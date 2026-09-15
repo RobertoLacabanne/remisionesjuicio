@@ -81,7 +81,9 @@ PIEZAS = [
      "correspondiente al período comprendido entre el primero de enero y el treinta y "
      "uno de diciembre del ejercicio consultado.", 4),
 
-    ("informe_pericial", "INFORME PERICIAL CONTABLE",
+    # El catálogo lo reconoce como `informe_contable`, que es más específico que
+    # `informe_pericial` y es la respuesta correcta para este título.
+    ("informe_contable", "INFORME PERICIAL CONTABLE",
      "El perito que suscribe, contador público designado en autos, informa que del "
      "análisis de la documentación puesta a disposición surgen las inconsistencias que "
      "se detallan, sin que ello importe pronunciamiento sobre responsabilidades.", 3),

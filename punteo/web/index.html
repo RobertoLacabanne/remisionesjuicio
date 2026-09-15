@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="es-AR" data-tema="">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Punteo de Evidencia — UFIL Paraná</title>
+<meta name="color-scheme" content="light dark">
+<!-- El ícono va embebido y no como archivo: así no hay un pedido más al arrancar, y
+     sobre todo no hay un 404 de favicon en el registro del servidor cada vez que
+     alguien abre la aplicación. Es una foja con el filete de bronce de la marca. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='5' fill='%231E242C'/%3E%3Crect x='7' y='6' width='18' height='20' rx='2' fill='%23FBFAF7'/%3E%3Crect x='7' y='6' width='3' height='20' fill='%23B08442'/%3E%3Cpath d='M13 12h9M13 16h9M13 20h6' stroke='%234E5866' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/estilo.css">
+</head>
+<body>
+
+<header class="barra">
+  <button class="barra-marca" id="ir-inicio" title="Volver a los casos">
+    <span class="marca-filete" aria-hidden="true"></span>
+    <span class="marca-texto">
+      <strong>Punteo</strong>
+      <small>de evidencia</small>
+    </span>
+  </button>
+
+  <nav class="barra-nav" id="nav" hidden>
+    <button data-vista="legajo">Legajo</button>
+    <button data-vista="revision">Revisión</button>
+    <button data-vista="checklist">Checklist</button>
+    <button data-vista="testigos">Testigos</button>
+    <button data-vista="punteo">Punteo</button>
+  </nav>
+
+  <div class="barra-caso" id="barra-caso" hidden>
+    <span class="caso-legajo" id="caso-legajo"></span>
+    <span class="caso-caratula" id="caso-caratula"></span>
+  </div>
+
+  <div class="barra-der">
+    <span class="guardado" id="guardado" hidden></span>
+    <button class="icono" id="tema" title="Claro / oscuro" aria-label="Cambiar tema">◐</button>
+  </div>
+</header>
+
+<main id="principal">
+
+  <!-- ══════════════════════════════════════════════════════════ CASOS ══ -->
+  <section class="vista" id="vista-casos">
+    <div class="ancho">
+      <div class="titulo-fila">
+        <h1>Casos</h1>
+        <button class="boton principal" id="nuevo-caso">Nuevo caso</button>
+      </div>
+      <div id="lista-casos" class="lista-casos"></div>
+      <p class="pie-estado" id="estado-maquina"></p>
+    </div>
+  </section>
+
+  <!-- ═════════════════════════════════════════════════════════ LEGAJO ══ -->
+  <section class="vista" id="vista-legajo">
+    <div class="ancho">
+      <h1>El legajo</h1>
+
+      <div class="tarjeta zona-carga" id="zona-carga">
+        <p class="zona-titulo">Arrastrá acá los PDF del legajo</p>
+        <p class="zona-ayuda">o <button class="enlace" id="elegir-pdf">elegilos del disco</button>.
+          El original no se modifica nunca: se guarda bajo su SHA-256 y queda de sólo lectura.</p>
+        <input type="file" id="archivo-pdf" accept="application/pdf" multiple hidden>
+      </div>
+
+      <div id="lista-documentos"></div>
+
+      <div class="tarjeta procesar" id="tarjeta-procesar" hidden>
+        <div class="procesar-cab">
+          <div>
+            <h2>Procesar</h2>
+            <p class="ayuda">Lee cada página, busca la foliatura y propone las piezas de
+              evidencia. Se puede parar: lo leído queda guardado y al volver retoma donde iba.</p>
+          </div>
+          <div class="procesar-botones">
+            <button class="boton principal" id="procesar">Procesar el legajo</button>
+            <button class="boton" id="detener" hidden>Parar</button>
+          </div>
+        </div>
+        <div class="progreso" id="progreso" hidden>
+          <div class="progreso-fila">
+            <span class="rueda" aria-hidden="true"></span>
+            <span id="progreso-etapa"></span>
+            <span class="mono" id="progreso-numeros"></span>
+            <span class="mono tenue" id="progreso-falta"></span>
+          </div>
+          <div class="progreso-barra"><div id="progreso-relleno"></div></div>
+        </div>
+        <p class="procesar-mensaje" id="procesar-mensaje" hidden></p>
+      </div>
+
+      <div class="tarjeta" id="tarjeta-foliatura" hidden>
+        <h2>Foliatura</h2>
+        <p class="ayuda">La foja no es la página del PDF. El sistema busca el número
+          impreso en el margen y lo valida por serie: acepta un tramo sólo cuando el
+          número crece de a uno junto con la página. Una foja <em>detectada</em> es una
+          conjetura hasta que alguien la confirma.</p>
+        <div id="resumen-foliatura"></div>
+        <div id="tramos-foliatura"></div>
+      </div>
+
+      <div class="tarjeta peligro-zona">
+        <h2>Borrar el caso</h2>
+        <p class="ayuda">Se lleva los PDF, las páginas leídas y todo el trabajo de
+          revisión, que es lo único que no se regenera. Hay que escribir el número de
+          legajo exacto.</p>
+        <div class="fila-borrar">
+          <input type="text" id="confirmar-borrado" placeholder="número de legajo" class="mono">
+          <button class="boton peligro" id="borrar-caso">Borrar</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══════════════════════════════════════════════════════ REVISIÓN ══ -->
+  <section class="vista sin-ancho" id="vista-revision">
+    <div class="revision">
+
+      <div class="tira" id="tira" title="Tira de fojas del legajo"></div>
+
+      <!-- PANEL IZQUIERDO — el documento -->
+      <div class="panel-doc">
+        <div class="doc-controles">
+          <button class="mini" id="pag-anterior" title="Página anterior">‹</button>
+          <span class="doc-ubicacion">
+            <span class="rotulo">pág.</span>
+            <input class="mono campo-pagina" id="ir-pagina" inputmode="numeric" size="5">
+            <span class="mono tenue" id="pagina-total"></span>
+            <span class="separador-vertical"></span>
+            <span class="rotulo">foja</span>
+            <input class="mono campo-foja" id="campo-foja" size="8" placeholder="—">
+            <span class="sello-foja" id="sello-foja"></span>
+          </span>
+          <button class="mini" id="pag-siguiente" title="Página siguiente">›</button>
+          <span class="espaciador"></span>
+          <button class="mini" id="zoom-menos" title="Alejar">−</button>
+          <span class="mono tenue" id="zoom-valor">100%</span>
+          <button class="mini" id="zoom-mas" title="Acercar">+</button>
+          <button class="mini" id="rotar" title="Rotar la vista">⟳</button>
+          <button class="mini" id="buscar-abrir" title="Buscar en el legajo (B)">Buscar</button>
+          <button class="mini destacado" id="nueva-evidencia" title="Crear evidencia desde esta foja (M)">
+            + Evidencia desde esta foja</button>
+        </div>
+        <div class="doc-lienzo" id="doc-lienzo">
+          <div class="doc-marco" id="doc-marco">
+            <img id="doc-imagen" alt="Página del legajo">
+            <div class="resalte" id="resalte" hidden></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- PANEL DERECHO — la evidencia -->
+      <aside class="panel-ev" id="panel-ev">
+        <div class="ev-cab">
+          <span class="ev-numero mono" id="ev-numero"></span>
+          <span class="sello" id="ev-sello"></span>
+          <span class="espaciador"></span>
+          <span class="mono tenue" id="ev-posicion"></span>
+        </div>
+
+        <div class="ev-cuerpo" id="ev-cuerpo">
+          <p class="vacio">Seleccioná una pieza en el checklist o procesá el legajo.</p>
+        </div>
+
+        <div class="ev-decision" id="ev-decision" hidden>
+          <button class="decidir incluir"   data-estado="incluida"  title="I">Incluir<kbd>I</kbd></button>
+          <button class="decidir pendiente" data-estado="pendiente" title="P">Pendiente<kbd>P</kbd></button>
+          <button class="decidir excluir"   data-estado="excluida"  title="E">Excluir<kbd>E</kbd></button>
+        </div>
+        <div class="ev-navegar" id="ev-navegar" hidden>
+          <button class="boton" id="ev-anterior">← Anterior</button>
+          <span class="contadores mono" id="ev-contadores"></span>
+          <button class="boton" id="ev-siguiente">Siguiente →</button>
+        </div>
+      </aside>
+    </div>
+  </section>
+
+  <!-- ═════════════════════════════════════════════════════ CHECKLIST ══ -->
+  <section class="vista" id="vista-checklist">
+    <div class="ancho ancho-amplio">
+      <div class="titulo-fila">
+        <h1>Checklist</h1>
+        <div class="vistas-check" id="vistas-check">
+          <button data-modo="lista" class="activo">Lista</button>
+          <button data-modo="grupos">Grupos</button>
+          <button data-modo="cronologia">Cronología</button>
+        </div>
+      </div>
+
+      <div class="contadores-tira" id="contadores-tira"></div>
+
+      <div class="barra-filtros">
+        <input type="search" id="filtro-texto" placeholder="Buscar en las piezas…">
+        <select id="filtro-estado">
+          <option value="todas">Todas</option>
+          <option value="pendientes">Pendientes</option>
+          <option value="incluidas">Incluidas</option>
+          <option value="excluidas">Excluidas</option>
+          <option value="sin_testigo">Sin testigo</option>
+          <option value="sin_foja">Sin foja</option>
+          <option value="foja_sin_confirmar">Foja sin confirmar</option>
+          <option value="baja_confianza">Baja confianza</option>
+          <option value="duplicados">Posibles duplicados</option>
+          <option value="modificadas">Modificadas a mano</option>
+          <option value="manuales">Cargadas a mano</option>
+        </select>
+        <select id="filtro-orden">
+          <option value="manual">Orden manual</option>
+          <option value="pagina">Por página</option>
+          <option value="grupos">Por sector</option>
+          <option value="cronologico">Cronológico</option>
+          <option value="tipo">Por tipo</option>
+          <option value="testigo">Por testigo</option>
+        </select>
+        <span class="espaciador"></span>
+        <div class="acciones-lote" id="acciones-lote" hidden>
+          <span class="mono" id="lote-cuenta"></span>
+          <button class="mini" data-lote="incluida">Incluir</button>
+          <button class="mini" data-lote="pendiente">Pendiente</button>
+          <button class="mini" data-lote="excluida">Excluir</button>
+          <button class="mini" id="lote-unir">Unir</button>
+          <button class="mini" id="lote-grupo">Mover a sector…</button>
+          <button class="mini" id="lote-testigo">Asignar testigo…</button>
+        </div>
+      </div>
+
+      <div id="cuerpo-checklist"></div>
+    </div>
+  </section>
+
+  <!-- ══════════════════════════════════════════════════════ TESTIGOS ══ -->
+  <section class="vista" id="vista-testigos">
+    <div class="ancho">
+      <div class="titulo-fila">
+        <h1>Testigos</h1>
+        <label class="casilla"><input type="checkbox" id="testigos-solo-incluidas">
+          Sólo la prueba incluida</label>
+      </div>
+      <p class="ayuda">Qué pieza introduce cada persona al debate. En una remisión, una
+        pieza incluida sin quién la introduzca es un agujero que hay que ver antes de
+        presentar.</p>
+      <div id="cuerpo-testigos"></div>
+      <div id="fusiones"></div>
+    </div>
+  </section>
+
+  <!-- ════════════════════════════════════════════════════════ PUNTEO ══ -->
+  <section class="vista" id="vista-punteo">
+    <div class="ancho">
+      <h1>Generar el punteo</h1>
+      <p class="ayuda">El generador recibe <strong>únicamente</strong> las piezas
+        marcadas para incluir. No vuelve a mirar el expediente y no reordena: la salida
+        se arma con lo que revisaste, en el orden que aprobaste.</p>
+
+      <div class="tarjeta" id="tarjeta-verificar"></div>
+
+      <div class="tarjeta">
+        <h2>Cómo</h2>
+        <div class="opciones-punteo">
+          <label>Orden
+            <select id="punteo-criterio">
+              <option value="manual">Manual</option>
+              <option value="grupos">Por sectores</option>
+              <option value="cronologico">Cronológico</option>
+              <option value="tipo">Por tipo de prueba</option>
+              <option value="testigo">Por testigo introductor</option>
+            </select>
+          </label>
+          <label class="casilla"><input type="checkbox" id="punteo-encabezados" checked>
+            Con encabezados de sector</label>
+          <label>Numeración
+            <select id="punteo-numeracion">
+              <option value="continua">Continua</option>
+              <option value="por_grupo">Reiniciar en cada sector</option>
+            </select>
+          </label>
+          <label class="casilla"><input type="checkbox" id="punteo-exigir-foja" checked>
+            Marcar las fojas sin confirmar</label>
+          <button class="boton principal" id="generar-punteo">Generar punteo</button>
+        </div>
+      </div>
+
+      <div class="tarjeta" id="tarjeta-salida" hidden>
+        <div class="titulo-fila">
+          <h2>Vista previa</h2>
+          <div class="exportaciones">
+            <button class="boton" id="copiar">Copiar</button>
+            <button class="boton" data-exportar="rtf">.rtf</button>
+            <button class="boton" data-exportar="txt">.txt</button>
+            <button class="boton" data-exportar="json">.json</button>
+          </div>
+        </div>
+        <p class="ayuda">Cada párrafo se puede editar y sigue sabiendo de qué pieza salió.
+          Con el campo vacío vuelve al texto generado.</p>
+        <div class="punteo-salida" id="punteo-salida"></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- diálogos -->
+<dialog id="dlg" class="dlg"></dialog>
+<div class="aviso" id="aviso" hidden></div>
+<div class="buscador" id="buscador" hidden>
+  <div class="buscador-caja">
+    <input type="search" id="buscador-campo" placeholder="Buscar en todo el legajo…">
+    <button class="mini" id="buscador-cerrar">Cerrar</button>
+  </div>
+  <div class="buscador-resultados" id="buscador-resultados"></div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>
