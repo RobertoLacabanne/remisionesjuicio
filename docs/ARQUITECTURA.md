@@ -454,6 +454,10 @@ un número.
 
 ---
 
+El plan por etapas, con el estado de cada una, está en [`HITOS.md`](HITOS.md).
+
+---
+
 ## 14. Lo que el MVP no hace
 
 Y conviene decirlo para que nadie lo espere: no lee manuscrito, no clasifica por

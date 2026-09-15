@@ -350,11 +350,39 @@ $('#borrar-caso').onclick = async () => {
 };
 
 /* ═══════════════════════════════════════════════════════════════ REVISIÓN ══ */
-async function cargarPaginas() {
+// Cuántas páginas se traen de una. Es una ventana, no el legajo entero: con cinco mil
+// fojas, pedirlas todas al abrir el caso son varios megas de JSON antes de que se vea
+// nada. Lo que cae fuera de la ventana se pide de a una cuando hace falta.
+const PAGINAS_POR_TANDA = 500;
+
+async function cargarPaginas(desde = 1) {
   if (!E.caso) return;
-  const r = await api(`/api/caso/${E.caso.slug}/paginas?desde=1&limite=500`);
-  E.paginas = r.paginas; E.totalPaginas = r.total;
+  const r = await api(`/api/caso/${E.caso.slug}/paginas?desde=${desde}&limite=${PAGINAS_POR_TANDA}`);
+  E.totalPaginas = r.total;
+  if (desde === 1) E.paginas = r.paginas;
+  else {
+    const conocidas = new Set(E.paginas.map(p => p.numero_global));
+    E.paginas = E.paginas.concat(r.paginas.filter(p => !conocidas.has(p.numero_global)))
+                         .sort((a, b) => a.numero_global - b.numero_global);
+  }
   $('#pagina-total').textContent = r.total ? `/ ${r.total}` : '';
+}
+
+/**
+ * Los datos de una página, de la ventana cargada o pidiéndola.
+ *
+ * Sin esto, en un legajo de más de quinientas fojas el visor mostraba la imagen pero la
+ * foja salía vacía y el recuadro del fragmento no se dibujaba, porque no conocía el
+ * tamaño de la página. Se veía como que el legajo no estaba foliado de la 501 en
+ * adelante, que es la peor forma de fallar: una mentira prolija.
+ */
+async function datosPagina(numero) {
+  const cacheada = E.paginas.find(x => x.numero_global === numero);
+  if (cacheada) return cacheada;
+  try {
+    await cargarPaginas(Math.max(1, numero - 20));
+  } catch { /* si falla, se sigue sin los datos y la foja se muestra como desconocida */ }
+  return E.paginas.find(x => x.numero_global === numero) || null;
 }
 
 async function cargarRevision() {
@@ -373,27 +401,51 @@ function pintarPanelVacio() {
   $('#ev-numero').textContent = ''; $('#ev-sello').className = 'sello'; $('#ev-sello').textContent = '';
 }
 
-/** La tira de fojas: una marca por página, pintada según el estado de su evidencia. */
+// Cuántas marcas dibuja la tira como máximo. Con una marca por página, un legajo de
+// cinco mil fojas son cinco mil nodos en el DOM y la pantalla se arrastra. Por encima
+// de este número cada marca agrupa varias páginas: la tira sigue contestando lo único
+// que tiene que contestar de un vistazo —por dónde voy y cómo viene la revisión— y el
+// costo deja de crecer con el tamaño del legajo.
+const MARCAS_TIRA = 300;
+
+/** La tira de fojas, pintada según el estado de la evidencia que cubre cada página. */
 function pintarTira() {
   const porPagina = new Map();
   for (const ev of E.evidencias) {
     for (let p = ev.pagina_inicio; p <= (ev.pagina_fin || ev.pagina_inicio); p++) {
       // Gana el estado más «fuerte»: si una página tiene una incluida y una pendiente,
       // lo que importa saber de un vistazo es que ahí ya hay algo que va al escrito.
-      const previo = porPagina.get(p);
-      if (previo === 'incluida') continue;
+      if (porPagina.get(p) === 'incluida') continue;
       porPagina.set(p, ev.estado);
     }
   }
+  const total = E.totalPaginas || 0;
+  const porMarca = Math.max(1, Math.ceil(total / MARCAS_TIRA));
   const tira = $('#tira');
   tira.innerHTML = '';
   const frag = document.createDocumentFragment();
-  for (let p = 1; p <= E.totalPaginas; p++) {
+
+  for (let desde = 1; desde <= total; desde += porMarca) {
+    const hasta = Math.min(total, desde + porMarca - 1);
+    // Con varias páginas por marca, gana el estado más fuerte del tramo: una marca
+    // gris donde hay prueba incluida escondería justamente lo que hay que ver.
+    let estado = '';
+    for (let p = desde; p <= hasta; p++) {
+      const e = porPagina.get(p);
+      if (e === 'incluida') { estado = 'incluida'; break; }
+      if (e && estado !== 'pendiente') estado = e;
+      if (e === 'pendiente') estado = 'pendiente';
+    }
     const b = document.createElement('button');
-    b.className = `tira-marca ${porPagina.get(p) || ''} ${p === E.pagina ? 'actual' : ''}`;
-    const pag = E.paginas.find(x => x.numero_global === p);
-    b.title = `pág. ${p}${pag && pag.foja_etiqueta ? ` · foja ${pag.foja_etiqueta}` : ' · sin foja'}`;
-    b.onclick = () => irAPagina(p);
+    const actual = E.pagina >= desde && E.pagina <= hasta;
+    b.className = `tira-marca ${estado} ${actual ? 'actual' : ''}`;
+    const pag = E.paginas.find(x => x.numero_global === desde);
+    // Si la página no está en la ventana cargada, NO se dice «sin foja»: no se sabe.
+    // Decir que no tiene foja una que sí la tiene es exactamente la clase de mentira
+    // prolija que este sistema existe para no cometer.
+    const foja = !pag ? '' : pag.foja_etiqueta ? ` · foja ${pag.foja_etiqueta}` : ' · sin foja';
+    b.title = porMarca === 1 ? `pág. ${desde}${foja}` : `págs. ${desde}–${hasta}${foja}`;
+    b.onclick = () => irAPagina(desde);
     frag.appendChild(b);
   }
   tira.appendChild(frag);
@@ -417,7 +469,7 @@ async function irAPagina(numero, resalte) {
   img.style.width = `${Math.round(100 * E.zoom)}%`;
   marco.style.transform = E.giro ? `rotate(${E.giro}deg)` : '';
 
-  const pag = E.paginas.find(x => x.numero_global === numero);
+  const pag = await datosPagina(numero);
   $('#campo-foja').value = pag && pag.foja_etiqueta ? pag.foja_etiqueta : '';
   const sello = $('#sello-foja');
   const origen = pag ? pag.foja_origen : 'desconocida';
@@ -483,8 +535,10 @@ async function abrirEvidencia(indice) {
   const ev = await api(`/api/caso/${E.caso.slug}/evidencia/${breve.id}`);
   E.evidencias[indice] = { ...breve, ...ev };
 
-  const pag = E.paginas.find(x => x.numero_global === ev.pagina_inicio) || {};
-  await irAPagina(ev.pagina_inicio || 1, { ...ev, ancho_pt: pag.ancho_pt, alto_pt: pag.alto_pt });
+  // El tamaño de la página lo resuelve `pintarResalte` contra la ventana cargada, que
+  // `irAPagina` deja al día antes de llamarlo. Buscarlo acá adelantaba la consulta a
+  // una ventana que todavía podía no tener esta página.
+  await irAPagina(ev.pagina_inicio || 1, ev);
 
   $('#ev-numero').textContent = `#${ev.id}`;
   const sello = $('#ev-sello');

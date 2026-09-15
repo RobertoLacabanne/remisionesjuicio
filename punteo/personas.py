@@ -212,12 +212,52 @@ def _anotar_testigo(cx, evidencia_id, anterior_id, nuevo_id) -> None:
 
 
 # ───────────────────────────────────────────────────── propuestas de fusión ──
-def _parecido(a: str, b: str) -> float:
-    """Jaccard sobre las palabras del nombre. Simple y suficiente para PROPONER."""
+def _emparejar(pa: set[str], pb: set[str]) -> set[str]:
+    """
+    Qué palabras comparten dos nombres, contando la inicial como la palabra entera.
+
+    «ANDRADE, R.» y «ANDRADE, Rubén» son la misma persona escrita por dos empleados
+    distintos, y en un legajo aparecen las dos formas. Sin esto, la inicial no coincide
+    con nada y el par no se propone.
+    """
+    comunes = pa & pb
+    for corta in (p for p in (pa - pb) if len(p) == 1):
+        if any(larga.startswith(corta) for larga in (pb - pa) if len(larga) > 1):
+            comunes.add(corta)
+    for corta in (p for p in (pb - pa) if len(p) == 1):
+        if any(larga.startswith(corta) for larga in (pa - pb) if len(larga) > 1):
+            comunes.add(corta)
+    return comunes
+
+
+def _parecido(a: str, b: str) -> tuple[float, str]:
+    """
+    Cuánto se parecen dos nombres, y por qué. Devuelve (score, motivo).
+
+    No alcanza con Jaccard, y el caso que lo demuestra es el más común de todos:
+    «ANDRADE, Rubén Osvaldo» y «ANDRADE, Rubén» comparten dos palabras de tres, o sea
+    0,67, y quedaban por debajo del umbral. Son obviamente la misma persona y el sistema
+    ni siquiera lo preguntaba.
+
+    Por eso se miran dos cosas. La CONTENCIÓN —que todas las palabras del nombre corto
+    estén en el largo— atrapa el nombre incompleto, que es como se escribe la mitad de
+    las veces. Se le exige compartir al menos dos palabras para que «PÉREZ, Juan» y
+    «GÓMEZ, Juan» no entren: un nombre de pila común no es una identidad.
+    """
     pa, pb = set(a.split()), set(b.split())
     if not pa or not pb:
-        return 0.0
-    return len(pa & pb) / len(pa | pb)
+        return 0.0, ""
+    comunes = _emparejar(pa, pb)
+    if not comunes:
+        return 0.0, ""
+
+    jaccard = len(comunes) / len(pa | pb)
+    contenido = len(comunes) >= min(len(pa), len(pb)) and len(comunes) >= 2
+    if contenido:
+        # Cuanto más se parecen en largo, más seguro es. «ANDRADE, R.» contra un nombre
+        # de cinco palabras es contención igual, pero mucho menos concluyente.
+        return round(max(jaccard, 0.75 + 0.25 * jaccard), 3), "uno es el nombre incompleto del otro"
+    return round(jaccard, 3), "nombres parecidos"
 
 
 def proponer_fusiones(cx: sqlite3.Connection) -> dict:
@@ -233,7 +273,7 @@ def proponer_fusiones(cx: sqlite3.Connection) -> dict:
             par = (min(a["id"], b["id"]), max(a["id"], b["id"]))
             if par in decididas:
                 continue
-            score, motivo = _parecido(a["nombre_norm"], b["nombre_norm"]), "nombres parecidos"
+            score, motivo = _parecido(a["nombre_norm"], b["nombre_norm"])
             # El documento es una clave fuerte: si coincide, son la misma y la propuesta
             # sale con score 1. Aun así se PROPONE y no se aplica sola.
             if a["documento"] and a["documento"] == b["documento"]:

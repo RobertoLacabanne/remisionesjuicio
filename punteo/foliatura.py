@@ -206,9 +206,19 @@ def detectar(cx: sqlite3.Connection) -> dict:
     protegidas = {r["numero_global"] for r in cx.execute(
         "SELECT numero_global FROM pagina WHERE foja_origen IN ('confirmada','manual')")}
 
+    # El orden de estas dos importa y costó un error de clave foránea: las páginas que
+    # una persona CONFIRMÓ conservan su `tramo_id`, así que borrar los tramos primero
+    # dejaba filas apuntando a un tramo que ya no existe y SQLite abortaba la
+    # redetección entera. Pasaba apenas alguien confirmaba un tramo y después cargaba
+    # otro PDF, que es la secuencia normal de trabajo.
+    #
+    # Se suelta el vínculo en TODAS las páginas antes de borrar. Una foja confirmada no
+    # necesita su tramo: el tramo es un rastro de cómo se detectó, y una vez que una
+    # persona la miró, el valor se sostiene solo.
+    cx.execute("UPDATE pagina SET tramo_id = NULL")
     cx.execute("DELETE FROM tramo_foliatura")
     cx.execute("""UPDATE pagina SET foja_etiqueta=NULL, foja_num=NULL, foja_sufijo='',
-                         foja_origen='desconocida', foja_confianza=NULL, tramo_id=NULL
+                         foja_origen='desconocida', foja_confianza=NULL
                    WHERE foja_origen = 'detectada'""")
 
     escritas = 0

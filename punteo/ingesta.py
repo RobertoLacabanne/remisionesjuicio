@@ -145,9 +145,12 @@ def reordenar(cx: sqlite3.Connection, orden_ids: list[int]) -> None:
         # Los tramos de foliatura quedan sin sentido con otra numeración: se borran y
         # se vuelven a detectar. Las fojas CONFIRMADAS no se tocan, que es lo que
         # importa: el trabajo de una persona no se pierde por reordenar archivos.
+        #
+        # Se suelta el vínculo en TODAS las páginas antes de borrar, incluidas las
+        # confirmadas. Si no, esas filas quedan apuntando a un tramo inexistente y
+        # SQLite aborta la transacción por clave foránea.
+        cx.execute("UPDATE pagina SET tramo_id = NULL")
         cx.execute("DELETE FROM tramo_foliatura")
-        cx.execute("""UPDATE pagina SET tramo_id = NULL
-                       WHERE foja_origen IN ('desconocida','detectada')""")
         cx.execute("""UPDATE pagina SET foja_etiqueta=NULL, foja_num=NULL, foja_sufijo='',
                              foja_origen='desconocida', foja_confianza=NULL
                        WHERE foja_origen = 'detectada'""")

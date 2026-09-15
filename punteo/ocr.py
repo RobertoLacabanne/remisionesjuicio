@@ -287,6 +287,15 @@ def imagen_pagina(cx: sqlite3.Connection, numero_global: int, *,
 
     cache = Path(config.DERIVADOS) / f"p{numero_global:06d}-{dpi}.jpg"
     if cache.exists():
+        try:
+            # Se marca el uso a mano en lugar de confiar en la fecha de acceso del
+            # sistema de archivos: casi todos los Linux modernos montan con `relatime`
+            # y no actualizan `atime` en cada lectura, así que el podado por «lo menos
+            # usado» terminaba borrando por orden de creación, que es justo al revés de
+            # lo que conviene mientras alguien revisa un tramo del legajo.
+            os.utime(cache, None)
+        except OSError:
+            pass
         return cache.read_bytes(), "image/jpeg"
 
     im = _pixmap(Path(fila["ruta"]), fila["numero_pdf"], dpi)
@@ -308,9 +317,15 @@ def imagen_pagina(cx: sqlite3.Connection, numero_global: int, *,
 
 
 def _podar_cache(carpeta: Path) -> None:
-    """Borra las imágenes más viejas cuando la caché pasa del tope."""
+    """Borra las imágenes menos usadas cuando la caché pasa del tope."""
     tope = config.CACHE_IMAGENES_MB * 1024 * 1024
-    archivos = [(p.stat().st_atime, p.stat().st_size, p) for p in carpeta.glob("p*.jpg")]
+    archivos = []
+    for p in carpeta.glob("p*.jpg"):
+        try:
+            st = p.stat()
+        except OSError:
+            continue          # se borró entre el listado y el stat
+        archivos.append((st.st_mtime, st.st_size, p))
     total = sum(s for _, s, _ in archivos)
     if total <= tope:
         return
