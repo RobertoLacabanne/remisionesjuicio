@@ -1,0 +1,36 @@
+# Correr Punteo en esta máquina, con Docker, sin instalar Python ni Tesseract.
+#
+#     docker compose up -d      levantar
+#     docker compose down       bajar
+#
+# Y se abre en:  http://127.0.0.1:8714
+services:
+  punteo:
+    build: .
+    image: punteo-evidencia
+    container_name: punteo
+
+    # ── LA PUERTA ────────────────────────────────────────────────────────────
+    # `127.0.0.1:8714:8714` y no `8714:8714`. La diferencia no es cosmética: sin el
+    # `127.0.0.1` delante, Docker publica el puerto en TODAS las interfaces y el legajo
+    # queda disponible para cualquiera de la red de la oficina. Con él, sólo esta
+    # máquina llega.
+    ports:
+      - "127.0.0.1:8714:8714"
+
+    # El trabajo vive en ./datos del host. Si esta línea no está, todo lo revisado
+    # desaparece cuando se recrea el contenedor.
+    volumes:
+      - ./datos:/app/datos
+
+    environment:
+      # Esto significa «quién puede llegar a este puerto ya está restringido afuera de
+      # este proceso», y acá es cierto por el `127.0.0.1` de arriba. **Si alguna vez se
+      # saca ese prefijo del puerto, hay que sacar también esta línea**, o el legajo
+      # queda abierto de par en par.
+      PUNTEO_ACCESO: abierto
+      PUNTEO_DATOS: /app/datos
+      # Más hilos que núcleos no rinde: se pelean por el mismo CPU.
+      PUNTEO_NUCLEOS: "4"
+
+    restart: unless-stopped

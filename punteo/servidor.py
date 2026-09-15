@@ -24,8 +24,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import (busqueda, casos, config, exportacion, foliatura, generacion, grupos,
-               ingesta, ocr, personas)
+from . import (acceso, busqueda, casos, config, exportacion, foliatura, generacion,
+               grupos, ingesta, ocr, personas)
 from .almacen import ArchivoInvalido
 from .evidencia import catalogo, deteccion, duplicados, modelo
 from .trabajo import Procesador
@@ -34,6 +34,11 @@ from .trabajo import Procesador
 # motivo, y peor: el avance que ve la pantalla sería el del otro caso.
 _PROCESADORES: dict[str, Procesador] = {}
 _CANDADO = threading.Lock()
+
+# La puerta. Arranca abierta porque en `127.0.0.1` la aplicación la ve sólo quien está
+# sentado en la máquina; `servir()` la reemplaza por una que pide clave en cuanto el
+# proceso escucha en otra dirección. Ver punteo/acceso.py.
+PORTERIA = acceso.Porteria(exigir=False)
 
 
 class ErrorHTTP(Exception):
@@ -621,6 +626,12 @@ class Manejador(BaseHTTPRequestHandler):
         self.cuerpo = self.rfile.read(largo) if largo else b""
 
         try:
+            # LA PUERTA, antes que cualquier ruta. Va acá arriba y no en cada manejador
+            # justamente porque un manejador nuevo se agrega sin acordarse del control,
+            # y lo que queda abierto es un legajo penal.
+            if not self._paso_la_puerta(ruta):
+                return
+
             # Las dos rutas que no devuelven JSON se atienden antes de la tabla.
             m = re.fullmatch(r"/api/caso/([\w-]+)/pagina/(\d+)/imagen", ruta)
             if m and self.command == "GET":
@@ -648,6 +659,65 @@ class Manejador(BaseHTTPRequestHandler):
         except Exception as e:
             traceback.print_exc()
             self._json(500, {"error": f"{type(e).__name__}: {e}"})
+
+    def _paso_la_puerta(self, ruta: str) -> bool:
+        """
+        ¿Este pedido sigue adelante? Si no, ya se contestó acá adentro.
+
+        Devuelve un valor en vez de levantar una excepción porque la respuesta no es
+        siempre un error: la primera visita sin sesión recibe la pantalla de la clave,
+        que es un 200 perfectamente normal.
+        """
+        if PORTERIA.tiene_permiso(self.headers.get("Cookie", "")):
+            if ruta == "/salir" and self.command == "POST":
+                PORTERIA.cerrar(self.headers.get("Cookie", ""))
+                self.send_response(303)
+                self.send_header("Location", "/")
+                self.send_header("Set-Cookie",
+                                 f"{acceso.COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return False
+            return True
+
+        ip = self.client_address[0] if self.client_address else "?"
+        if ruta == "/acceso" and self.command == "POST":
+            espera = PORTERIA.espera_de(ip)
+            if espera > 0:
+                return self._pagina_acceso(espera=espera, codigo=429)
+            campos = parse_qs(self.cuerpo.decode("utf-8", "replace"))
+            token = PORTERIA.intentar(ip, (campos.get("clave") or [""])[0])
+            if not token:
+                return self._pagina_acceso(error="Clave incorrecta.", codigo=401)
+            self.send_response(303)
+            self.send_header("Location", "/")
+            # HttpOnly: el token no se lee desde JavaScript. SameSite=Strict: no viaja
+            # en un pedido que venga de otro sitio, que es lo que hace inútil un enlace
+            # preparado por un tercero.
+            self.send_header("Set-Cookie",
+                             f"{acceso.COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return False
+
+        # Cualquier otra cosa sin sesión: a la pantalla de la clave. A la API se le
+        # contesta JSON, porque la interfaz ya cargada tiene que poder distinguir
+        # «se venció la sesión» de «el servidor devolvió HTML por error».
+        if ruta.startswith("/api/"):
+            self._json(401, {"error": "sesión vencida", "acceso": "clave"})
+            return False
+        return self._pagina_acceso()
+
+    def _pagina_acceso(self, *, error: str = "", espera: float = 0.0,
+                       codigo: int = 200) -> bool:
+        cuerpo = acceso.pagina(error, espera)
+        self.send_response(codigo)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(cuerpo)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(cuerpo)
+        return False
 
     # ── respuestas ──
     def _json(self, codigo: int, datos) -> None:
@@ -731,15 +801,21 @@ class Manejador(BaseHTTPRequestHandler):
 
 
 def servir(puerto: int | None = None, host: str | None = None) -> None:
+    global PORTERIA
     puerto = puerto or config.PUERTO
     host = host or config.HOST
     config.carpeta_casos().mkdir(parents=True, exist_ok=True)
+
+    # La puerta se decide por la dirección de escucha, no por una opción aparte: una
+    # opción aparte se olvida, y lo que queda abierto es un legajo. Ver acceso.py.
+    PORTERIA = acceso.Porteria(exigir=acceso.hace_falta_clave(host))
+
     servidor = ThreadingHTTPServer((host, puerto), Manejador)
     servidor.daemon_threads = True
     print(f"Punteo de Evidencia — http://{host}:{puerto}")
     print(f"  datos en {config.DATOS}")
-    if host != "127.0.0.1":
-        print("  ATENCIÓN: está escuchando fuera de esta máquina.")
+    for linea in PORTERIA.anuncio(host, puerto):
+        print(linea)
     try:
         servidor.serve_forever()
     except KeyboardInterrupt:

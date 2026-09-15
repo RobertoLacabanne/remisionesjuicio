@@ -1,0 +1,73 @@
+# Despliegue en Render — https://render.com
+#
+# ════════════════════════════════════════════════════════════════════════════
+# LEER ESTO ANTES DE SUBIR UN LEGAJO REAL.
+#
+# Acá el material vive en el servidor de un tercero. Toda la arquitectura de esta
+# aplicación está construida sobre lo contrario: procesamiento local, sin red, sin
+# que un PDF salga nunca de la máquina. Subir a Render **no es la instalación de la
+# fiscalía**: es una forma de mostrarle el sistema a alguien sin instalarle nada.
+#
+# Para eso sirve, y para eso está bien. Con documentación sintética —la que genera
+# `herramientas/generar_legajo.py`— es exactamente la herramienta correcta.
+#
+# Con un legajo real hay tres cosas que decidir antes, y ninguna la puede decidir
+# este archivo:
+#
+#   1. si la fiscalía acepta que documentación de una causa se aloje en un servidor
+#      de un proveedor extranjero;
+#   2. que el tráfico va por HTTPS hasta Render, pero adentro de Render el material
+#      queda en disco sin cifrar por la aplicación;
+#   3. que la clave de abajo es lo único que separa el legajo de cualquiera que
+#      adivine la dirección.
+#
+# La instalación de trabajo es local: ver EMPEZAR.md.
+# ════════════════════════════════════════════════════════════════════════════
+#
+# Se aplica con Blueprints (New → Blueprint → apuntar a este repositorio).
+services:
+  - type: web
+    name: punteo
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter          # el plan gratuito NO permite disco persistente: ver abajo
+    region: oregon
+    healthCheckPath: /api/estado
+
+    # ── EL DISCO ─────────────────────────────────────────────────────────────
+    # Sin esto, el sistema de archivos del contenedor es efímero: se borra en cada
+    # despliegue y en cada reinicio. Eso significa perder los PDF, las bases de los
+    # casos y —lo único que no se puede volver a generar— TODO EL TRABAJO DE
+    # REVISIÓN. Un legajo de cuatrocientas fojas revisado durante dos días
+    # desaparece con un `git push`.
+    disk:
+      name: datos
+      mountPath: /app/datos
+      sizeGB: 10
+
+    envVars:
+      - key: PUNTEO_DATOS
+        value: /app/datos
+
+      # ── LA PUERTA ────────────────────────────────────────────────────────
+      # Acá el puerto SALE A INTERNET: cualquiera que sepa la dirección llega.
+      #
+      # NO poner `PUNTEO_ACCESO=abierto` en este archivo. Esa variable significa
+      # «quién llega a este puerto ya está restringido afuera del proceso», y acá
+      # eso es falso. Ponerla deja el legajo abierto para cualquiera.
+      - key: PUNTEO_ACCESO
+        value: clave
+
+      # `generateValue` la crea una vez y la guarda en Render; se lee en el panel del
+      # servicio (Environment) y se le dicta a quien tenga que entrar. Sin esto, el
+      # proceso genera una nueva en cada arranque y sale sólo por el log — en un
+      # servicio que se reinicia solo, es una clave que nadie llega a leer.
+      - key: PUNTEO_CLAVE
+        generateValue: true
+
+      # En un plan chico, más hilos que núcleos sólo hace que se peleen.
+      - key: PUNTEO_NUCLEOS
+        value: "2"
+
+    # Render inyecta PORT y espera que el proceso escuche ahí. El CMD del Dockerfile
+    # lo toma de ahí; no hace falta declararlo.

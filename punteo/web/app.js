@@ -60,6 +60,13 @@ async function api(ruta, opciones = {}) {
   const r = await fetch(ruta, cfg);
   const tipo = r.headers.get('Content-Type') || '';
   const datos = tipo.includes('json') ? await r.json() : await r.text();
+  // Sesión vencida. Se recarga para que el servidor devuelva la pantalla de la clave:
+  // seguir mostrando una interfaz que ya no puede guardar nada es la peor de las
+  // opciones, porque alguien sigue decidiendo sobre piezas y nada se escribe.
+  if (r.status === 401 && datos && datos.acceso === 'clave') {
+    location.reload();
+    throw new Error('la sesión venció');
+  }
   if (!r.ok) throw new Error((datos && datos.error) || `error ${r.status}`);
   return datos;
 }
