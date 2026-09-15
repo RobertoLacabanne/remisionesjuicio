@@ -44,6 +44,34 @@ dependencia de test: la máquina de producción no tiene internet.
 Dependencias permitidas: PyMuPDF, Pillow, pytesseract. Ninguna más sin una razón
 escrita. Nada de Node en producción, nada de framework web, nada de paso de compilación.
 
+## Trabajo conjunto con Codex
+
+Este proyecto está diseñado para trabajar con Claude Code como coordinador principal y
+Codex como segundo ingeniero. Las instrucciones de Codex están en [`AGENTS.md`](AGENTS.md)
+y la instalación local está documentada en [`docs/CODEX-SETUP.md`](docs/CODEX-SETUP.md).
+
+Al comenzar una sesión de desarrollo importante, si el plugin está disponible, comprobar
+`/codex:status`. Para cambios relevantes, no dar por terminado un hito sin una segunda
+mirada independiente de Codex.
+
+Usar, según corresponda:
+
+```text
+/codex:review --background
+/codex:adversarial-review --background
+/codex:rescue --background <tarea>
+/codex:status
+/codex:result
+```
+
+Claude y Codex pueden investigar o revisar en paralelo, pero no deben modificar al mismo
+tiempo los mismos archivos. Para arquitectura, persistencia, detección de evidencia,
+foliatura, generación final, privacidad y rendimiento, preferir una revisión independiente
+antes de consolidar el cambio.
+
+Si Codex no está disponible, no fingir que se ejecutó la revisión: indicarlo claramente y
+seguir las instrucciones de `docs/CODEX-SETUP.md` para recuperar la integración.
+
 ## Estilo
 
 Castellano en todo: nombres de módulos, funciones, columnas, rutas de API y comentarios.
