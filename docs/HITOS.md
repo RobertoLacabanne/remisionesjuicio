@@ -93,6 +93,15 @@ de prueba entra como copia exacta del primero—. Todas en verde.
 
 ---
 
+## Hito 10 — Repositorio propio · **hecho**
+
+El proyecto salió de la carpeta de AppUFIL y pasó a su propio repositorio, con la
+historia de los tres commits conservada (`git subtree split`). Las tipografías se
+copiaron adentro con sus licencias OFL, así que no queda ninguna dependencia de que
+AppUFIL esté al lado en el disco.
+
+---
+
 ## Lo que sigue, por orden de valor
 
 1. **Medir con un legajo real grande.** Es lo que más puede cambiar decisiones tomadas.

@@ -19,7 +19,7 @@ casi nada se copió textual, porque casi nada de AppUFIL habla de evidencia.
 | Vista `v_contrato` filtrando por estado firme | ✅ | | | El patrón exacto se reusa como `v_evidencia_incluida`, con el mismo argumento: el `SELECT` obvio tiene que ser el seguro. |
 | `auditoria` / `revision_humana` — historial append-only | | ✅ | | Se fusionan en una sola tabla `revision`: acá no hay reproceso que pueda huerfanar decisiones, porque la evidencia no se regenera pisando la existente. |
 | `DESIGN_SYSTEM.md` — la tipografía dice la procedencia | ✅ | | | Es la mejor idea de diseño del proyecto anterior y se toma entera. La paleta no: ver abajo. |
-| `assets/fuentes/` — Archivo, Source Serif 4, IBM Plex Mono | ✅ | | | OFL, ya están en disco, no hay una razón para bajar otras. |
+| `assets/fuentes/` — Archivo, Source Serif 4, IBM Plex Mono | ✅ | | | OFL 1.1, con sus licencias. **Están copiadas adentro de este repositorio**, no referenciadas: el proyecto tiene que andar solo, sin AppUFIL al lado en el disco. |
 | Paleta azul tribunal / oro | | | ✅ | Punteo necesita verde, punzó y ámbar para los tres estados de decisión, que es su distinción principal. Un cromo azul institucional dejaría la pantalla con cinco colores peleando. Ver `docs/IDENTIDAD.md`. |
 | `capa2_extraccion.py`, `capa2_campos.py`, `perfiles/` | | | ✅ | Extracción de campos de contratos y facturas. No aplica. |
 | `capa3_identidad.py` — fusión de personas | | ✅ | | Sólo el criterio: proponer fusiones, nunca fusionar en silencio, guardar la decisión humana. El algoritmo de AppUFIL se apoya en CUIL/CUIT como clave fuerte, que en un legajo de testigos casi nunca está. |

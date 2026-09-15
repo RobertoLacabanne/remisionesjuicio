@@ -14,9 +14,11 @@ RAIZ = Path(__file__).resolve().parent.parent
 # resolviera por hilo, un pedido sin caso abierto se quedaría sin esquema y sin interfaz.
 ESQUEMA = RAIZ / "punteo" / "esquema.sql"
 WEB     = RAIZ / "punteo" / "web"
-# Las fuentes son las de AppUFIL: OFL, ya están en disco y no hay razón para bajar
-# otras. Si el proyecto se muda a su propio repositorio, hay que copiar esa carpeta.
-FUENTES = Path(os.environ.get("PUNTEO_FUENTES", RAIZ.parent / "assets" / "fuentes"))
+# Las tres tipografías viven adentro del proyecto y no se piden a ningún servidor: es
+# la única forma de que el sistema ande desconectado, y además una fuente que llega de
+# un CDN le cuenta a alguien que este equipo está mirando este legajo. Son OFL 1.1 y sus
+# licencias están al lado (ver assets/fuentes/LEEME.md).
+FUENTES = Path(os.environ.get("PUNTEO_FUENTES", RAIZ / "assets" / "fuentes"))
 
 DATOS = Path(os.environ.get("PUNTEO_DATOS", RAIZ / "datos"))
 

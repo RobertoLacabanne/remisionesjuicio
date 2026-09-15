@@ -14,6 +14,11 @@ exactamente lo que se marcó para incluir, y nada más**.
 La aplicación ayuda a encontrar, ordenar y describir evidencia. **Nunca decide qué
 prueba ofrece Fiscalía.**
 
+> Es una aplicación distinta de [AppUFIL](https://github.com/RobertoLacabanne/AppUFIL),
+> que analiza documentación administrativa de contratos. Comparten oficina y algunas
+> soluciones técnicas, y nada más: ver
+> [`docs/REUTILIZACION-APPUFIL.md`](docs/REUTILIZACION-APPUFIL.md).
+
 ---
 
 ## Lo que hace hoy
@@ -114,7 +119,7 @@ investigaciones**.
 ## Dónde está cada cosa
 
 ```
-punteo/
+punteo/                               el paquete
   config.py  db.py  esquema.sql       base y configuración
   casos.py  almacen.py  ingesta.py    alta de casos y entrada de PDF
   ocr.py  foliatura.py                lectura de página y fojas
@@ -123,6 +128,10 @@ punteo/
   generacion.py  exportacion.py       el punteo y su salida
   busqueda.py  trabajo.py  servidor.py
   web/                                interfaz
+assets/fuentes/                       las tres tipografías, OFL, servidas de disco
+pruebas/                              unittest, fixtures sintéticos
+herramientas/                         generador de legajos de prueba
+docs/                                 arquitectura, identidad, hitos
 ```
 
 * [`docs/ARQUITECTURA.md`](docs/ARQUITECTURA.md) — cómo está construido y por qué

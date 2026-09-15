@@ -13,22 +13,24 @@ foja verificable. Todo lo que sigue es subordinado a eso.
 
 ## 0. Qué se decidió antes de escribir código
 
-### 0.1 Dónde vive el proyecto
+### 0.1 Un proyecto aparte, y por qué
 
-El proyecto es independiente de AppUFIL, pero vive por ahora dentro de su repositorio,
-en la carpeta `punteo/`. No comparte paquete de Python, ni base de datos, ni
-configuración, ni una sola línea de código de contratos, facturas o contratados.
+Punteo es una aplicación distinta de AppUFIL y vive en su propio repositorio. No
+comparte paquete de Python, ni base de datos, ni configuración, ni una sola línea de
+código de contratos, facturas o contratados.
 
-El motivo es de acceso y no de diseño: la sesión de trabajo tiene permiso sobre
-`RobertoLacabanne/AppUFIL` y sobre ningún otro repositorio, y crear repositorios
-nuevos en la cuenta de alguien no es una decisión que corresponda tomar sin
-preguntar. La carpeta está armada para que mudarse sea barato: raíz propia, paquete
-propio, pruebas propias, documentación propia y sus propias dependencias. Un
-`git subtree split --prefix=punteo` la convierte en un repositorio con historia y sin
-tocar nada.
+La separación no es de prolijidad: es de dominio. AppUFIL contesta «¿qué dice este
+volumen de documentación administrativa?» sobre contratos y comprobantes de la
+Legislatura. Punteo contesta «¿qué prueba ofrece Fiscalía en este legajo, y en qué
+foja está cada pieza?». Arrastrar el vocabulario de contratos al modelo de datos de
+la evidencia habría producido una aplicación que parece dos aplicaciones.
 
-**Es una decisión discutible y está señalada como tal.** Si el proyecto va a tener
-repositorio propio, conviene mudarlo temprano.
+Lo que sí se tomó de AppUFIL —el diseño, no el árbol de archivos— está en
+[`REUTILIZACION-APPUFIL.md`](REUTILIZACION-APPUFIL.md), componente por componente.
+
+**El proyecto es autosuficiente.** Las tres tipografías viven en `assets/fuentes/` con
+sus licencias OFL: nada se pide a un servidor y nada depende de que AppUFIL esté al
+lado en el disco.
 
 ### 0.2 El segundo agente
 

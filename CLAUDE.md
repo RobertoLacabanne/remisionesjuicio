@@ -59,7 +59,7 @@ líneas, probablemente son dos.
 ## Estructura
 
 ```
-punteo/
+punteo/                               el paquete
   config.py  db.py  esquema.sql       base y configuración
   casos.py   almacen.py  ingesta.py   alta de casos y entrada de PDF
   ocr.py     foliatura.py             lectura de página y fojas
@@ -68,9 +68,15 @@ punteo/
   generacion.py  exportacion.py       el punteo y su salida
   busqueda.py  trabajo.py  servidor.py
   web/                                interfaz
+assets/fuentes/                       las tres tipografías, OFL, servidas de disco
 pruebas/                              unittest, fixtures sintéticos
-docs/                                 arquitectura, identidad, reutilización
+herramientas/                         generador de legajos de prueba
+docs/                                 arquitectura, identidad, reutilización, hitos
 ```
+
+Este repositorio es **sólo Punteo**. AppUFIL es otra aplicación, de otro dominio —
+documentación administrativa de contratos— y no se importa desde acá ni se toca desde
+acá. Lo que se tomó de su diseño está anotado en `docs/REUTILIZACION-APPUFIL.md`.
 
 ## Datos de prueba
 
