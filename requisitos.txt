@@ -1,0 +1,11 @@
+# Versiones fijas. Se bajan UNA vez en una máquina con internet y se llevan a la
+# máquina de trabajo, que no tiene:
+#
+#   pip download -r requisitos.txt -d ruedas/
+#   pip install --no-index --find-links ruedas/ -r requisitos.txt
+#
+# Aparte hace falta Tesseract con el paquete de castellano, que no se instala por pip:
+#   Debian/Ubuntu:  apt install tesseract-ocr tesseract-ocr-spa
+PyMuPDF==1.28.2
+pillow==11.0.0
+pytesseract==0.3.13
