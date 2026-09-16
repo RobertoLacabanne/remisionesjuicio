@@ -192,8 +192,10 @@ varias páginas le falta la foja final, la cita sale `fs. 409/[FOJA PENDIENTE]` 
 `[RANGO DE FOJAS A REVISAR]`.
 
 `pagina.foja_lectura` distingue además cómo se obtuvo el número: `leida` en el papel,
-`interpolada` desde el tramo, o `desconocida` en las bases anteriores a esa columna.
-Confirmar un tramo no convierte en leído lo interpolado, y el chequeo previo lo cuenta.
+`interpolada` desde el tramo, `sello_ilegible` cuando hay un sello de folio cuyo número
+está escrito a mano y no se pudo leer, o `desconocida` en las bases anteriores a esa
+columna. Confirmar un tramo no convierte en leído lo interpolado, y el chequeo previo lo
+cuenta.
 
 Un legajo sin foliar es un caso normal, no un error: todas las páginas quedan en
 `desconocida`, el sistema funciona igual usando `numero_global` como referencia técnica,
@@ -223,6 +225,33 @@ medio legajo.
 
 La confianza sale del largo del tramo y de la proporción de páginas donde el número se
 leyó de verdad contra las interpoladas.
+
+**Y los tramos se controlan entre sí.** Un tramo suelto siempre parece una serie
+razonable; lo que lo delata es lo que dice del de al lado. Una foliatura de legajo no
+puede repetir una foja ni retroceder cuando avanza la página, así que dos tramos que se
+contradicen no pueden ser los dos foliatura: **caen los dos**, y no gana el más creíble.
+La contradicción prueba que esa señal no sirve, no cuál de los dos tramos era el bueno,
+y quedarse con uno sería quedarse con un número falso al que ya no contradice nadie. Un
+tramo que no contradice a ninguno sobrevive, así que el legajo foliado en dos etapas
+sigue funcionando.
+
+El caso que lo hizo falta está en [`LEGAJO-REAL.md`](LEGAJO-REAL.md) §1: la paginación
+interna de dos informes —cada uno numerando sus hojas desde 1— pasaba por foliatura con
+confianza 0,89. Una serie descartada **no se borra**: se guarda con su motivo y la
+pantalla la muestra tachada, porque «no se detectó foliatura» a secas parece que el
+sistema no miró el margen, y miró.
+
+### El sello de folio que no se puede leer
+
+En buena parte de los legajos la foliatura es un sello redondo —«FOLIO Nº ____»— con el
+número escrito **a mano**. Tesseract lee la palabra impresa y no lee la cifra.
+
+Esa hoja no se queda sin más en `desconocida`, junto a las que nadie folió: son dos cosas
+distintas y la diferencia es de trabajo. Cuando se lee la palabra del sello en zona de
+margen y no hay ninguna cifra, la página queda marcada en `foja_lectura` como
+`sello_ilegible`. **No se le pone foja** —el número no se leyó y no se inventa—, pero el
+visor dice que ahí hay un número para copiar del papel y la tarjeta de foliatura las
+cuenta aparte.
 
 ---
 
@@ -281,7 +310,34 @@ evidencia manual es ciudadana de primera y no lleva ninguna marca de segunda cat
 lo único que la distingue es que su confianza no existe, porque no hay nada que medir en
 algo que escribió una persona.
 
-### 5.4 Los tipos son un catálogo, no un enum
+### 5.4 Qué se mira para cortar, y qué se afirma de lo cortado
+
+El corte se decide sobre el **encabezado**: las primeras líneas de la página, que es
+donde va el título. Pero en un escaneo de verdad arriba de todo no está el título:
+están el borde negro de la hoja, el sello de folio, una firma al margen y las marcas del
+abrochado, y de todo eso el OCR saca renglones como `A! ES GN` o `| /`. Por eso una
+línea que no aporta al menos seis letras **no cuenta como encabezado**. No se mira más
+abajo que antes: se miran seis líneas que dicen algo. Sin ese filtro, siete actas de
+declaración testimonial seguidas quedaban adentro de una sola pieza
+([`LEGAJO-REAL.md`](LEGAJO-REAL.md) §3).
+
+La **fecha** de la pieza sigue la misma disciplina, y es más delicada porque se escribe en
+el punteo y se usa para ordenar. No se busca «una fecha»: se buscan las dos fórmulas con
+las que un instrumento declara la suya —la de otorgamiento, «a los 28 días del mes de
+agosto del año 2025», y la de encabezamiento, «Paraná, 14 de julio del 2025», donde el
+lugar y la coma son lo que la atan a este documento—. Una fecha suelta en el cuerpo **no
+se afirma**, aunque sea la única del texto: en un expediente suele ser la del oficio que
+se contesta, la de la resolución que se cita o la de una captura de pantalla. Queda vacía
+y la carga quien revisa, que tiene el documento a la vista. Un campo vacío se completa;
+una fecha falsa se copia al escrito.
+
+Esa misma fecha es después una **contradicción dura** para los duplicados: dos piezas con
+fecha cierta y distinta no son el mismo documento, por parecido que sea el texto. Hace
+falta porque el parecido no alcanza contra un formulario —siete actas del mismo sumario
+comparten el membrete, la fórmula de juramento y el artículo 275 del Código Penal
+transcripto entero— y una lista de propuestas falsas es una lista que nadie mira.
+
+### 5.5 Los tipos son un catálogo, no un enum
 
 Los tipos de pieza probatoria viven en `evidencia/catalogo.py` como datos: clave,
 etiqueta, familia, patrones de título, peso. Agregar un tipo es agregar una entrada, no
@@ -499,6 +555,16 @@ que unir a mano; un corte de menos esconde una pieza adentro de otra y ahí sí 
 perder prueba. La mitigación es que el sistema está sesgado a **cortar de más**: es
 mucho más barato unir dos piezas que descubrir que faltaba una. Y que la confianza baja
 se ve y se puede filtrar.
+
+**Lo compatible no es lo mismo que lo probado.** Es el error de fondo que destapó el
+primer legajo real, cinco veces seguidas: el sistema afirmaba a partir de una señal
+*compatible* con lo que buscaba en lugar de exigir una que sólo pudiera significar eso.
+Un número que crece en el margen es compatible con una foliatura y también con la
+paginación de un informe; una fecha en el texto es compatible con la fecha del documento
+y también con la de cualquiera que el documento cite. La mitigación no es subir umbrales
+—un umbral más alto tapa el caso que se vio y deja pasar el que sigue— sino buscar una
+contradicción dura o una marca de atribución. Está desarrollado en
+[`LEGAJO-REAL.md`](LEGAJO-REAL.md).
 
 **La calidad del OCR manda sobre todo lo demás.** Un escaneo a 150 DPI en gris, o una
 fotocopia de fotocopia, produce texto que no alcanza para detectar ni títulos ni fojas.

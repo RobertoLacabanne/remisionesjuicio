@@ -247,6 +247,14 @@ label { font-size:.84rem; color:var(--tinta-2); }
 .tramo { display:flex; align-items:center; gap:12px; padding:7px 11px; font-size:.82rem;
          border:1px solid var(--filete); border-radius:var(--radio); margin-bottom:5px;
          background:var(--papel); }
+/* Una serie que se descartó. Se muestra tachada y apagada porque no es un dato del
+   legajo: es la explicación de por qué el sistema no la usó. */
+.tramo.descartado { background:transparent; border-style:dashed; opacity:.72; }
+/* Sin el nowrap, «págs. 4–7» se parte en dos renglones en cuanto el motivo es largo, y
+   un rango de páginas partido al medio se lee mal justo donde hay que leerlo bien. */
+.tramo.descartado .mono { white-space:nowrap; flex:0 0 auto; }
+.tramo.descartado .mono:first-child { text-decoration:line-through; }
+.ayuda.descarte { margin:14px 0 6px; }
 
 /* ══════════════════════════════════════════════════ pantalla de revisión ══ */
 .vista.sin-ancho.activa { display:block; height:calc(100vh - var(--barra-alto)); }

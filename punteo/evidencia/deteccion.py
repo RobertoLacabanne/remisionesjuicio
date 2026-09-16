@@ -35,6 +35,23 @@ from . import catalogo, modelo
 # escapaban los documentos que traen dos renglones de membrete antes del título; con
 # ocho empezaba a pegar contra el primer párrafo del cuerpo, que menciona otras piezas.
 LINEAS_ENCABEZADO = 6
+# Cuántas letras tiene que aportar una línea para que se la cuente como encabezado.
+#
+# En un escaneo de verdad, arriba de todo casi nunca está el título. Están el borde
+# negro de la hoja, el sello circular de folio, una firma al margen y las marcas del
+# abrochado, y de todo eso el OCR saca renglones como «A! ES GN», «| /» o «2, SÍ». Sin
+# este filtro esas seis líneas de basura SON el encabezado y el título verdadero, dos
+# renglones más abajo, no se mira nunca.
+#
+# El caso que lo hizo evidente: el primer legajo escaneado de verdad traía siete actas de
+# declaración testimonial, cada una con «ACTA DE DECLARACIÓN TESTIMONIAL» centrado y en
+# negrita, y el detector no reconoció ninguna. Las siete quedaron escondidas adentro de
+# una sola pieza de treinta y ocho páginas, que es la forma cara de equivocarse. Con el
+# filtro aparecen las siete sin mirar una línea más abajo que antes.
+#
+# Seis letras es una palabra corta. De cuatro a diez el resultado no cambia sobre ese
+# legajo, así que se toma el extremo conservador del tramo estable: descarta menos.
+MIN_LETRAS_LINEA = 6
 # Fuerza mínima del patrón para aceptar que acá arranca algo nuevo.
 UMBRAL_CORTE = 0.45
 # Una pieza más larga que esto se marca. No se parte sola: partir en un número redondo
@@ -157,6 +174,23 @@ def lineas_de(cx: sqlite3.Connection, pagina_id: int, limite: int | None = None)
     return fuera
 
 
+def es_legible(linea: Linea) -> bool:
+    """¿Esta línea dice algo, o es ruido del escaneo?"""
+    return sum(1 for c in linea.texto if c.isalpha()) >= MIN_LETRAS_LINEA
+
+
+def encabezado_de(cx: sqlite3.Connection, pagina_id: int) -> list[Linea]:
+    """
+    Las primeras líneas LEGIBLES de la página, que es donde va el título.
+
+    Se leen todas las líneas y se filtran, en lugar de cortar en las primeras seis: en
+    un escaneo el ruido está justamente arriba, y cortar primero es quedarse con el
+    ruido. Leerlas todas no cuesta nada, porque las palabras de la página se traen
+    enteras de la base igual.
+    """
+    return [l for l in lineas_de(cx, pagina_id) if es_legible(l)][:LINEAS_ENCABEZADO]
+
+
 def normalizar_encabezado(lineas: list[Linea]) -> str:
     """Mayúsculas y sin tildes: así es como el texto sobrevive al OCR."""
     return sin_tildes(" \n".join(l.texto for l in lineas)).upper()
@@ -185,7 +219,10 @@ def _frase(texto: str) -> str:
             fuera.append(p)
         else:
             fuera.append(p.lower())
-    salida = "".join(fuera).strip(" .:-—·")
+    # La barra y el guion bajo salen del escaneo —el borde de la hoja, una línea de
+    # firma— y se pegan al título. Esta cadena termina en el escrito: «| acta de
+    # declaración testimonial» es lo que alguien copia a un requerimiento.
+    salida = "".join(fuera).strip(" .:-—·|¦/\\_")
     return salida[:1].upper() + salida[1:] if salida else texto.strip()
 
 
@@ -199,30 +236,59 @@ def _linea_titulo(lineas: list[Linea], tipo: catalogo.Tipo) -> Linea | None:
     return None
 
 
-# Fechas que se pueden afirmar sin interpretar. No se intenta leer «a los doce días del
-# mes de marzo» sin año: una fecha incompleta que el sistema completa con el año del
-# legajo es exactamente el tipo de invención que no puede hacer.
-_FECHA_NUM = re.compile(r"\b(\d{1,2})[/\-\.](\d{1,2})[/\-\.](\d{2,4})\b")
 _MESES = {"enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5, "junio": 6,
           "julio": 7, "agosto": 8, "septiembre": 9, "setiembre": 9, "octubre": 10,
           "noviembre": 11, "diciembre": 12}
-_FECHA_LETRAS = re.compile(
-    r"\b(\d{1,2})\s+de\s+(" + "|".join(_MESES) + r")\s+de\s+(\d{4})\b", re.IGNORECASE)
+_MES = "|".join(_MESES)
+
+# La fecha que sale al escrito es la del documento, y un documento jurídico está lleno de
+# fechas que son de OTROS documentos. Por eso no se busca «una fecha»: se buscan las dos
+# fórmulas con las que un instrumento declara la suya.
+#
+# El caso que lo hizo evidente: siete actas de declaración testimonial de un mismo sumario,
+# labradas entre el 27 de agosto y el 4 de septiembre, salían las siete con fecha 7 de
+# agosto. Las siete citan en su primer párrafo, con esa fecha, la resolución que ordenó
+# las actuaciones, y el detector tomaba la primera fecha del texto. Siete fechas falsas,
+# todas iguales, en un punteo de prueba.
+#
+# Fórmula de otorgamiento: «a los 28 días del mes de agosto del año 2025». Es la fecha en
+# que se labró el acto y no puede ser de otra cosa. Los `\W{0,8}` toleran la basura que el
+# OCR mete entre los tokens de un escaneo —«a los 28 | días del mes de agosto»—, que si no
+# rompe justo la fórmula más confiable que hay.
+_FECHA_OTORGAMIENTO = re.compile(
+    r"\ba\s+los?\s+(\d{1,2})\W{0,8}d[ií]as?\s+del\s+mes\s+de\s+(" + _MES +
+    r")\W{0,8}(?:del?\s+)?(?:a[nñ]o\s+)?(\d{4})\b", re.IGNORECASE)
+# Fórmula de encabezamiento: «Paraná, 14 de julio del 2025». El lugar seguido de coma es
+# lo que la ata a este documento. Sin esa coma —«Resolución Nº 111/26, fechada 07 de agosto
+# de 2025»— la fecha es de la pieza que se cita, y no se afirma.
+_FECHA_ENCABEZAMIENTO = re.compile(
+    r"\b([A-Za-z][a-z]{2,})\s*,\s*(?:el\s+)?(\d{1,2})\s+de\s+(" + _MES +
+    r")\s+del?\s+(\d{4})\b", re.IGNORECASE)
+
+
+def _armar(d: int, mes: int, anio: int) -> str | None:
+    if 1 <= d <= 31 and 1 <= mes <= 12 and 1900 <= anio <= 2100:
+        return f"{anio:04d}-{mes:02d}-{d:02d}"
+    return None
 
 
 def detectar_fecha(texto: str) -> str | None:
-    """Fecha del documento en ISO, o None. Nunca se infiere ni se completa."""
-    m = _FECHA_LETRAS.search(sin_tildes(texto or ""))
+    """
+    Fecha del documento en ISO, o None. Nunca se infiere, ni se completa, ni se adivina.
+
+    Una fecha suelta en el cuerpo NO se afirma, aunque sea la única del texto: en un
+    expediente, la fecha que aparece suelta suele ser la del oficio que se contesta, la de
+    la resolución que se cita o la de una captura de pantalla. Queda vacía y la carga
+    quien revisa, que tiene el documento a la vista. Un campo vacío se completa; una fecha
+    falsa se copia al escrito.
+    """
+    plano = sin_tildes(texto or "")
+    m = _FECHA_OTORGAMIENTO.search(plano)
     if m:
-        d, mes, a = int(m.group(1)), _MESES[m.group(2).lower()], int(m.group(3))
-        if 1 <= d <= 31 and 1900 <= a <= 2100:
-            return f"{a:04d}-{mes:02d}-{d:02d}"
-    m = _FECHA_NUM.search(texto or "")
+        return _armar(int(m.group(1)), _MESES[m.group(2).lower()], int(m.group(3)))
+    m = _FECHA_ENCABEZAMIENTO.search(plano)
     if m:
-        d, mes, a = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        a = a + 2000 if a < 100 and a < 70 else a + 1900 if a < 100 else a
-        if 1 <= d <= 31 and 1 <= mes <= 12 and 1900 <= a <= 2100:
-            return f"{a:04d}-{mes:02d}-{d:02d}"
+        return _armar(int(m.group(2)), _MESES[m.group(3).lower()], int(m.group(4)))
     return None
 
 
@@ -342,7 +408,7 @@ def proponer(cx: sqlite3.Connection) -> list[Pieza]:
     anterior: int | None = None
     contador_previo: tuple[int, int] | None = None
     for pag in paginas:
-        lineas = lineas_de(cx, pag["id"], limite=LINEAS_ENCABEZADO)
+        lineas = encabezado_de(cx, pag["id"])
         encabezado = normalizar_encabezado(lineas)
         tipo, fuerza = catalogo.reconocer(encabezado)
         continua, contador = continuidad(encabezado)

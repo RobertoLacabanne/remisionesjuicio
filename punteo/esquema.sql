@@ -149,6 +149,12 @@ CREATE TABLE IF NOT EXISTS tramo_foliatura (
   confianza      REAL NOT NULL,
   paginas_leidas INTEGER NOT NULL,     -- dónde se leyó el número de verdad
   paginas_interpoladas INTEGER NOT NULL,
+  -- Por qué esta serie NO se usó, o NULL si está vigente. Un tramo descartado se guarda
+  -- igual: es la respuesta a «había números en el margen, ¿por qué no los tomó?», y sin
+  -- ella la pantalla dice «no se detectó foliatura» y parece que el sistema no miró.
+  -- La paginación interna de un informe es lo que más se descarta, y es correcto que se
+  -- descarte: no es la foliatura del legajo.
+  descartado     TEXT,
   creado_en      TEXT NOT NULL
 );
 
