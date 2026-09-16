@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import unittest
 
-from comun import CasoDePrueba
+from comun import CasoDePrueba, CasoVacio
 
 
 class CortaDondeCorresponde(CasoDePrueba):
@@ -112,6 +112,64 @@ class NoSeComeUnaPieza(CasoDePrueba):
         tipo, fuerza = catalogo.reconocer(encabezado)
         self.assertEqual(tipo.clave, "oficio")
         self.assertGreater(fuerza, 0.5)
+
+
+class ElContadorDeHojas(CasoVacio):
+    """
+    «HOJA 1 DE 2» no es una continuación: es el principio de un documento.
+
+    Tomarla por continuación juntaba dos actas del mismo tipo que venían seguidas, cada
+    una con su contador, en una sola pieza. La segunda quedaba adentro de la primera y
+    no se podía decidir sobre ella por separado.
+    """
+
+    def _rangos(self):
+        from punteo.evidencia import deteccion
+        deteccion.detectar(self.cx)
+        return [(e["pagina_inicio"], e["pagina_fin"]) for e in self.evidencias()]
+
+    def test_dos_actas_seguidas_del_mismo_tipo_son_dos_piezas(self):
+        self.cargar([["ACTA DE SECUESTRO", "HOJA 1 DE 2"],
+                     ["ACTA DE SECUESTRO", "HOJA 2 DE 2"],
+                     ["ACTA DE SECUESTRO", "HOJA 1 DE 2"],
+                     ["ACTA DE SECUESTRO", "HOJA 2 DE 2"]])
+        self.assertEqual(self._rangos(), [(1, 2), (3, 4)])
+
+    def test_una_acta_de_tres_hojas_sigue_siendo_una(self):
+        self.cargar([["ACTA DE SECUESTRO", "HOJA 1 DE 3"],
+                     ["ACTA DE SECUESTRO", "HOJA 2 DE 3"],
+                     ["ACTA DE SECUESTRO", "HOJA 3 DE 3"]])
+        self.assertEqual(self._rangos(), [(1, 3)])
+
+    def test_un_contador_que_no_sigue_la_cuenta_corta(self):
+        """
+        «HOJA 2 DE 5» después de «HOJA 2 DE 2» son dos documentos que numeran sus hojas:
+        la cuenta no sigue, y ante la duda se corta.
+        """
+        self.cargar([["ACTA DE SECUESTRO", "HOJA 1 DE 2"],
+                     ["ACTA DE SECUESTRO", "HOJA 2 DE 2"],
+                     ["ACTA DE SECUESTRO", "HOJA 2 DE 5"]])
+        self.assertEqual(self._rangos(), [(1, 2), (3, 3)])
+
+    def test_una_hoja_uno_abre_pieza_aunque_el_titulo_no_se_reconozca(self):
+        """
+        El contador corta por sí solo. Si esperaba a que el catálogo reconociera el
+        título, un documento con un título desconocido —o mal leído por el OCR— se
+        pegaba a la pieza anterior aunque dijera «HOJA 1 DE 2» con todas las letras.
+        """
+        self.cargar([["ACTA DE SECUESTRO", "HOJA 1 DE 1"],
+                     ["CONSTANCIA DE ALGO RARO", "HOJA 1 DE 2"],
+                     ["CONSTANCIA DE ALGO RARO", "HOJA 2 DE 2"]])
+        self.assertEqual(self._rangos(), [(1, 1), (2, 3)])
+
+    def test_la_hoja_uno_no_es_marca_de_continuidad(self):
+        from punteo.evidencia.deteccion import continuidad
+        self.assertEqual(continuidad("ACTA DE SECUESTRO\nHOJA 1 DE 2"), (False, (1, 2)))
+        self.assertEqual(continuidad("ACTA DE SECUESTRO\nHOJA 2 DE 2"), (True, (2, 2)))
+        self.assertEqual(continuidad("INFORME (CONTINUACION 1/3)"), (False, (1, 3)))
+        self.assertEqual(continuidad("PAG. 3/5"), (True, (3, 5)))
+        self.assertEqual(continuidad("SIGUE AL DORSO"), (True, None))
+        self.assertEqual(continuidad("SE DETALLA A CONTINUACION"), (False, None))
 
 
 class Catalogo(unittest.TestCase):

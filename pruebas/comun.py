@@ -51,6 +51,39 @@ def pdf_de(paginas: list[list[str]]) -> bytes:
     return datos
 
 
+class CasoVacio(unittest.TestCase):
+    """
+    Un caso sin nada adentro, para las pruebas que necesitan un legajo armado a medida.
+
+    El legajo sintético grande sirve para el recorrido completo, pero un caso límite
+    —dos actas seguidas con su contador de hojas— se lee mucho mejor con cuatro páginas
+    escritas ahí mismo que buscándolo adentro de treinta y nueve.
+    """
+
+    def setUp(self):
+        from punteo import casos, config
+        self._carpeta = Path(tempfile.mkdtemp(prefix="punteo-vacio-"))
+        self._datos = config.DATOS
+        config.DATOS = self._carpeta / "datos"
+        self.addCleanup(lambda: setattr(config, "DATOS", self._datos))
+        self.addCleanup(shutil.rmtree, self._carpeta, True)
+
+        self.caso = casos.crear(f"OGA-{self._testMethodName[:18]}/2026",
+                                "NN s/ Prueba armada a mano", "remision")
+        self.cx = casos.abrir(self.caso.slug)
+        self.addCleanup(self.cx.close)
+
+    def cargar(self, paginas: list[list[str]], nombre: str = "legajo.pdf"):
+        """Ingiere un PDF escrito acá mismo y lo lee. Sin Tesseract: capa nativa."""
+        from punteo import ingesta, ocr
+        ingesta.agregar(self.cx, pdf_de(paginas), nombre)
+        ocr.leer_caso(self.cx)
+
+    def evidencias(self, **kw):
+        from punteo.evidencia import modelo
+        return modelo.listar(self.cx, limite=500, **kw)["evidencias"]
+
+
 class CasoDePrueba(unittest.TestCase):
     """
     Base con un caso armado y listo. Cada prueba tiene su propia carpeta de datos, así

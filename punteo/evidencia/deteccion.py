@@ -64,6 +64,43 @@ _CONTINUACION = re.compile(
     r"|\bHOJA\s+\d+\s+DE\s+\d+\b"
     r"|\bP[AÁ]G(INA)?\.?\s*\d+\s*(DE|/)\s*\d+\b")
 
+# El contador de hojas, leído de verdad: «HOJA 2 DE 3», «PÁG. 2/5», «continuación 2 de 3».
+# Hay que leerlo y no sólo reconocerlo, porque la hoja 1 NO es una continuación: es el
+# principio de algo. Tomarla por continuación juntaba dos actas de secuestro seguidas
+# —cada una con su «HOJA 1 DE 2»— en una sola pieza, y la segunda desaparecía de la lista
+# adentro de la primera, que es la forma cara de equivocarse.
+_CONTADOR = re.compile(
+    r"\b(?:HOJA|P[AÁ]G(?:INA)?\.?|CONTINUACI[OÓ]N)\s*(\d{1,3})\s*(?:/|DE)\s*(\d{1,3})\b")
+
+
+def continuidad(encabezado: str) -> tuple[bool, tuple[int, int] | None]:
+    """
+    ¿Esta página dice que continúa algo? Y si lo dice con un contador, cuál es.
+
+    Devuelve (continúa, (hoja, total)). Con contador, sólo continúa de la hoja 2 en
+    adelante. Sin contador —«continúa al dorso», «viene de fs.»— se cree a la locución,
+    que por eso son pocas y estrechas.
+    """
+    m = _CONTADOR.search(encabezado)
+    if m:
+        hoja, total = int(m.group(1)), int(m.group(2))
+        return hoja >= 2, (hoja, total)
+    return bool(_CONTINUACION.search(encabezado)), None
+
+
+def _sigue_la_cuenta(actual: tuple[int, int] | None,
+                     anterior: tuple[int, int] | None) -> bool:
+    """
+    ¿El contador de esta hoja sigue al de la anterior?
+
+    Con «HOJA 3 DE 8» después de «HOJA 2 DE 8», sí. Después de «HOJA 2 DE 5», no: son dos
+    documentos distintos que casualmente numeran sus hojas. Si en la página anterior no
+    se leyó ningún contador, no hay con qué contradecir y se acepta.
+    """
+    if actual is None or anterior is None:
+        return True
+    return actual[1] == anterior[1] and actual[0] == anterior[0] + 1
+
 # Tokens que no se pasan a minúsculas al armar la descripción.
 _SIGLAS = {"DNI", "CUIT", "CUIL", "LE", "LC", "SA", "S.A.", "SRL", "S.R.L.", "MPF",
            "UFIL", "OGA", "PDF", "USB", "IMEI", "CBU", "IVA", "AFIP", "ARCA", "IAFAS",
@@ -303,11 +340,12 @@ def proponer(cx: sqlite3.Connection) -> list[Pieza]:
         piezas.append(abierta)
 
     anterior: int | None = None
+    contador_previo: tuple[int, int] | None = None
     for pag in paginas:
         lineas = lineas_de(cx, pag["id"], limite=LINEAS_ENCABEZADO)
         encabezado = normalizar_encabezado(lineas)
         tipo, fuerza = catalogo.reconocer(encabezado)
-        continua = bool(_CONTINUACION.search(encabezado))
+        continua, contador = continuidad(encabezado)
         # Un hueco, o el principio de otro PDF, cierran la pieza abierta. Lo segundo
         # porque una pieza que cruza dos archivos no se puede seguir representando con
         # `pagina_inicio`/`pagina_fin` en cuanto alguien reordena los documentos: entre
@@ -322,10 +360,20 @@ def proponer(cx: sqlite3.Connection) -> list[Pieza]:
         # adentro de otra, lo segundo es lo que hace perder prueba. Partir de más se
         # arregla con dos clics; lo que quedó adentro de otra pieza no lo ve nadie.
         sigue_lo_mismo = (continua and abierta is not None and not hueco
-                          and tipo.clave == abierta.tipo)
-        arranca = abierta is None or hueco or (fuerza >= UMBRAL_CORTE and not sigue_lo_mismo)
+                          and tipo.clave == abierta.tipo
+                          and _sigue_la_cuenta(contador, contador_previo))
+        # El contador corta por sí solo, sin esperar a que el título se reconozca: una
+        # «HOJA 1 DE 2» es el principio de un documento aunque su título sea uno que el
+        # catálogo no conoce o que el OCR leyó mal, y una cuenta que no sigue
+        # —«HOJA 2 DE 5» después de «HOJA 2 DE 2»— es otro documento. Si no, la hoja
+        # nueva se pegaba a la pieza anterior y quedaba escondida adentro.
+        reinicia = abierta is not None and contador is not None and (
+            contador[0] == 1 or not _sigue_la_cuenta(contador, contador_previo))
+        arranca = (abierta is None or hueco or reinicia
+                   or (fuerza >= UMBRAL_CORTE and not sigue_lo_mismo))
         if not arranca:
             anterior = pag["numero_global"]
+            contador_previo = contador or contador_previo
             textos.append(pag["texto"] or "")
             # La confianza de la pieza es la de la PEOR página que la compone, no el
             # promedio: si una de las seis fojas salió ilegible, la pieza entera merece
@@ -337,6 +385,7 @@ def proponer(cx: sqlite3.Connection) -> list[Pieza]:
         # con huecos de por medio no es la anterior en la numeración.
         cerrar(anterior if anterior is not None else pag["numero_global"] - 1)
         anterior = pag["numero_global"]
+        contador_previo = contador
         linea = _linea_titulo(lineas, tipo) if fuerza else (lineas[0] if lineas else None)
         descripcion = _frase(linea.texto) if linea else ""
         if not descripcion:
