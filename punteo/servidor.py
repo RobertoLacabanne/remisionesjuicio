@@ -728,11 +728,13 @@ class Manejador(BaseHTTPRequestHandler):
         self.wfile.write(cuerpo)
 
     def _binario(self, datos: bytes, mime: str, *, descarga: str | None = None,
-                 cache: str = "no-store") -> None:
+                 cache: str = "no-store", etag: str | None = None) -> None:
         self.send_response(200)
         self.send_header("Content-Type", mime)
         self.send_header("Content-Length", str(len(datos)))
         self.send_header("Cache-Control", cache)
+        if etag:
+            self.send_header("ETag", etag)
         if descarga:
             self.send_header("Content-Disposition", f'attachment; filename="{descarga}"')
         self.end_headers()
@@ -742,12 +744,28 @@ class Manejador(BaseHTTPRequestHandler):
         cx = _cx(slug)
         try:
             dpi = self.consulta("dpi")
-            datos, mime = ocr.imagen_pagina(cx, numero,
-                                            dpi=int(dpi) if dpi and dpi.isdigit() else None)
-            # La imagen de una página no cambia nunca: el original es inmutable. Se
-            # puede cachear fuerte y eso es lo que hace que pasar páginas se sienta
-            # instantáneo al volver sobre las que ya se miraron.
-            self._binario(datos, mime, cache="private, max-age=86400")
+            dpi = int(dpi) if dpi and dpi.isdigit() else None
+            # La dirección de la imagen lleva el número de página del CASO, y ese número
+            # se le cambia a todas las páginas cuando alguien reordena los PDF. Con la
+            # imagen cacheada un día entero, el visor seguía mostrando la hoja vieja con
+            # los datos de la nueva al lado. Por eso se revalida siempre: la etiqueta es
+            # la identidad real —documento, página del PDF, rotación y DPI—, el navegador
+            # la manda de vuelta y la mayoría de las veces esto contesta 304 sin mover un
+            # byte de imagen.
+            # La página se resuelve UNA vez: la etiqueta y los bytes tienen que salir de
+            # la misma lectura. Con dos consultas, un reordenamiento en el medio devuelve
+            # la hoja de un documento con la etiqueta de otro, y el navegador se queda
+            # con esa mezcla.
+            fila = ocr.pagina_para_imagen(cx, numero)
+            etiqueta = f'"{ocr.identidad_imagen(fila, dpi or config.DPI_VISOR)}"'
+            if self.headers.get("If-None-Match") == etiqueta:
+                self.send_response(304)
+                self.send_header("ETag", etiqueta)
+                self.send_header("Cache-Control", "private, no-cache")
+                self.end_headers()
+                return
+            datos, mime = ocr.imagen_de(fila, dpi=dpi)
+            self._binario(datos, mime, cache="private, no-cache", etag=etiqueta)
         except KeyError:
             self._json(404, {"error": f"no hay página {numero}"})
         except Exception as e:

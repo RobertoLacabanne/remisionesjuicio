@@ -119,7 +119,7 @@ class LegajoEscaneado(unittest.TestCase):
         self.assertGreater(len(datos), 5000)
         self.assertTrue(datos.startswith(b"\xff\xd8"))
         # Y NO se guardó una imagen por cada página del legajo al procesar.
-        cacheadas = len(list(Path(config.DERIVADOS).glob("p*.jpg")))
+        cacheadas = len(list(Path(config.DERIVADOS).glob("*.jpg")))
         self.assertLessEqual(cacheadas, 2,
                              "se rasterizaron páginas que nadie pidió")
 

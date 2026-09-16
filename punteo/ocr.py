@@ -268,10 +268,47 @@ def leer_caso(cx: sqlite3.Connection, *, avance=None, seguir=None) -> dict:
 
 
 # ───────────────────────────────────────────────── la imagen para el visor ──
+def pagina_para_imagen(cx: sqlite3.Connection, numero_global: int) -> sqlite3.Row:
+    fila = cx.execute("""SELECT p.numero_pdf, p.rotacion, d.ruta, d.sha256
+                           FROM pagina p JOIN documento d ON d.id = p.documento_id
+                          WHERE p.numero_global=?""", (numero_global,)).fetchone()
+    if not fila:
+        raise KeyError(f"no hay página global {numero_global}")
+    return fila
+
+
+def identidad_imagen(fila: sqlite3.Row, dpi: int) -> str:
+    """
+    Qué imagen es ésta, sin depender de la numeración del caso.
+
+    El número global NO sirve para identificarla: reordenar los PDF se lo cambia a todas
+    las páginas, y una caché con esa clave devolvía la hoja de otro documento con los
+    datos del correcto al lado. Decidir sobre una pieza mirando otra foja es exactamente
+    lo que este sistema existe para que no pase.
+
+    La identidad es el documento —su SHA-256, que no cambia nunca—, la página adentro de
+    ese PDF, la rotación con la que se leyó y el DPI. La rotación entra porque se fija al
+    leer la página: la imagen pedida antes de procesar sale derecha y la de después,
+    girada, y son dos imágenes distintas del mismo papel.
+    """
+    return f"{fila['sha256'][:16]}-p{fila['numero_pdf']:05d}-r{fila['rotacion'] or 0}-{dpi}"
+
+
 def imagen_pagina(cx: sqlite3.Connection, numero_global: int, *,
                   dpi: int | None = None) -> tuple[bytes, str]:
+    """La imagen de una página del caso, resolviendo primero de qué página se trata."""
+    return imagen_de(pagina_para_imagen(cx, numero_global), dpi=dpi)
+
+
+def imagen_de(fila: sqlite3.Row, *, dpi: int | None = None) -> tuple[bytes, str]:
     """
     La imagen de una página, para el visor. Se rasteriza en el momento y se cachea.
+
+    Recibe la fila ya resuelta y no el número de página a propósito: quien sirve la
+    imagen necesita la identidad para la etiqueta del navegador, y si la busca por su
+    cuenta puede leerla antes de un reordenamiento y los bytes después. Serviría la hoja
+    de un documento con la etiqueta de otro, que es la misma confusión que esa etiqueta
+    existe para evitar.
 
     Devuelve (bytes, tipo MIME). JPEG y no PNG: para un escaneo pesa entre un quinto y
     un décimo, y la caché de un legajo grande es la diferencia entre doscientos megas y
@@ -279,13 +316,7 @@ def imagen_pagina(cx: sqlite3.Connection, numero_global: int, *,
     eso vive en `derivados/`.
     """
     dpi = dpi or config.DPI_VISOR
-    fila = cx.execute("""SELECT p.numero_pdf, p.rotacion, d.ruta
-                           FROM pagina p JOIN documento d ON d.id = p.documento_id
-                          WHERE p.numero_global=?""", (numero_global,)).fetchone()
-    if not fila:
-        raise KeyError(f"no hay página global {numero_global}")
-
-    cache = Path(config.DERIVADOS) / f"p{numero_global:06d}-{dpi}.jpg"
+    cache = Path(config.DERIVADOS) / f"{identidad_imagen(fila, dpi)}.jpg"
     if cache.exists():
         try:
             # Se marca el uso a mano en lugar de confiar en la fecha de acceso del
@@ -320,7 +351,7 @@ def _podar_cache(carpeta: Path) -> None:
     """Borra las imágenes menos usadas cuando la caché pasa del tope."""
     tope = config.CACHE_IMAGENES_MB * 1024 * 1024
     archivos = []
-    for p in carpeta.glob("p*.jpg"):
+    for p in carpeta.glob("*.jpg"):
         try:
             st = p.stat()
         except OSError:
