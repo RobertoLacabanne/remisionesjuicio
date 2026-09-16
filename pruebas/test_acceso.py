@@ -247,6 +247,36 @@ class ElServidorConClave(unittest.TestCase):
         except urllib.error.HTTPError as e:
             self.assertEqual(e.code, 401)
 
+    def test_el_health_check_de_render_contesta_sin_sesion(self):
+        """
+        Render sondea sin cookie y sólo da el despliegue por bueno con un 2xx. Con
+        `healthCheckPath: /api/estado` recibía 401 y el despliegue no terminaba nunca.
+        Se lee la ruta del propio `render.yaml` para que no se vuelva a apuntar a algo
+        que esté detrás de la puerta.
+        """
+        import re
+        from punteo import servidor
+        texto = (RAIZ / "render.yaml").read_text(encoding="utf-8")
+        rutas = re.findall(r"^\s*healthCheckPath:\s*(\S+)", texto, re.MULTILINE)
+        self.assertEqual(len(rutas), 1, rutas)
+        ruta = rutas[0]
+        self.assertFalse(ruta.startswith("/api/"), ruta)
+
+        # Como en el contenedor: escucha en 0.0.0.0 y el sondeo llega por una IP interna.
+        escucha_antes = servidor.ESCUCHA
+        servidor.ESCUCHA = "0.0.0.0"
+        self.addCleanup(setattr, servidor, "ESCUCHA", escucha_antes)
+        pedido = urllib.request.Request(self.url(ruta))
+        pedido.add_header("Host", "10.0.0.5:10000")
+        r = urllib.request.urlopen(pedido)
+        cuerpo = r.read()
+
+        self.assertEqual(r.status, 200)
+        self.assertIn(b"Clave de acceso", cuerpo)
+        self.assertNotIn(b"/app.js", cuerpo)
+        self.assertNotIn(self.clave.encode(), cuerpo)
+        self.assertIsNone(r.headers.get("Set-Cookie"))
+
 
 class ElServidorSinClave(unittest.TestCase):
     """En loopback y sin clave, la aplicación no puede quedar pidiendo nada."""

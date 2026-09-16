@@ -32,7 +32,11 @@ services:
     dockerfilePath: ./Dockerfile
     plan: starter          # el plan gratuito NO permite disco persistente: ver abajo
     region: oregon
-    healthCheckPath: /api/estado
+    # La raíz y no `/api/estado`: con `PUNTEO_ACCESO=clave` la API sin sesión contesta
+    # 401, Render lo toma como caído y el despliegue no termina nunca. La raíz sin
+    # sesión devuelve la pantalla de la clave con 200, que alcanza para saber que el
+    # proceso atiende sin abrir nada. `pruebas/test_acceso.py` lo verifica.
+    healthCheckPath: /
 
     # ── EL DISCO ─────────────────────────────────────────────────────────────
     # Sin esto, el sistema de archivos del contenedor es efímero: se borra en cada
