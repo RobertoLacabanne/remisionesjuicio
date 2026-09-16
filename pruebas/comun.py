@@ -24,6 +24,33 @@ sys.path.insert(0, str(RAIZ))
 sys.path.insert(0, str(RAIZ / "herramientas"))
 
 
+def pdf_de(paginas: list[list[str]]) -> bytes:
+    """
+    Un PDF chico con capa de texto: cada página es la lista de sus renglones.
+
+    Sirve para los casos que necesitan un legajo distinto del sintético grande —un
+    segundo PDF que se agrega después, dos documentos seguidos del mismo tipo— sin pagar
+    el costo de generar el legajo entero otra vez.
+    """
+    import pymupdf
+    doc = pymupdf.open()
+    doc.set_metadata({"keywords": "PUNTEO-LEGAJO-SINTETICO-DE-PRUEBA"})
+    for lineas in paginas:
+        pag = doc.new_page(width=595, height=842)
+        y = 56
+        for linea in lineas:
+            pag.insert_text((56, y), linea, fontname="helv", fontsize=12)
+            y += 24
+        # El cuerpo hace que la página supere el mínimo de texto nativo: sin él, la
+        # ingesta la tomaría por escaneada y la mandaría a Tesseract.
+        pag.insert_textbox(pymupdf.Rect(56, y + 10, 539, 780),
+                           "Cuerpo del documento a los fines de la prueba. " * 12,
+                           fontname="tiro", fontsize=10.5)
+    datos = doc.tobytes(garbage=4, deflate=True)
+    doc.close()
+    return datos
+
+
 class CasoDePrueba(unittest.TestCase):
     """
     Base con un caso armado y listo. Cada prueba tiene su propia carpeta de datos, así

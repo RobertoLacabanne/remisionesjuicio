@@ -29,7 +29,7 @@ from dataclasses import dataclass
 
 from .. import config, db
 from ..castellano import sin_tildes
-from . import catalogo
+from . import catalogo, modelo
 
 # Cuántas líneas del principio de la página se miran como encabezado. Con tres se
 # escapaban los documentos que traen dos renglones de membrete antes del título; con
@@ -227,9 +227,60 @@ def _paginas_del_caso(cx: sqlite3.Connection) -> list[sqlite3.Row]:
                           ORDER BY numero_global""").fetchall()
 
 
+def paginas_cubiertas(cx: sqlite3.Connection) -> set[int]:
+    """
+    Las páginas que ya tienen una pieza que las representa, y por lo tanto no se vuelven
+    a proponer.
+
+    Cuenta lo que está activo y también lo que una persona apagó a propósito: una
+    carátula descartada no puede reaparecer como pieza nueva en cada procesamiento, y una
+    parte absorbida por una unión ya está representada por esa unión.
+
+    NO cuenta lo que apagó `rehacer`, que es justamente lo que se quiere volver a
+    proponer.
+
+    Una pieza que abarca páginas de dos PDF —una unión, o un rango cargado a mano— sólo
+    cubre las de su propio documento. En la unión eso no se nota, porque sus partes
+    cubren el resto; en un rango manual, las páginas del segundo PDF vuelven a
+    proponerse una vez, y queda una pieza de más que se descarta con dos clics. Es el
+    error barato: el caro es dar por cubierta una página que ninguna pieza representa.
+
+    Se mira documento por documento y no por número de página global, porque el global
+    se mueve al reordenar los PDF: el rango de una pieza vieja se remapea por sus
+    extremos y puede terminar abarcando un documento cargado después, que nunca fue
+    parte de ella.
+    """
+    paginas: dict[int, list[int]] = {}
+    for r in cx.execute("SELECT numero_global, documento_id FROM pagina"):
+        paginas.setdefault(r["documento_id"], []).append(r["numero_global"])
+
+    cubiertas: set[int] = set()
+    for e in cx.execute("""SELECT id, documento_id, pagina_inicio, pagina_fin, activa
+                             FROM evidencia WHERE pagina_inicio IS NOT NULL"""):
+        if not modelo.representa_sus_paginas(cx, e["id"], bool(e["activa"])):
+            continue
+        desde, hasta = e["pagina_inicio"], e["pagina_fin"] or e["pagina_inicio"]
+        candidatas = (paginas.get(e["documento_id"], []) if e["documento_id"]
+                      else [g for gs in paginas.values() for g in gs])
+        cubiertas.update(g for g in candidatas if desde <= g <= hasta)
+    return cubiertas
+
+
 def proponer(cx: sqlite3.Connection) -> list[Pieza]:
-    """Recorre el legajo y arma la lista de piezas. No escribe nada en la base."""
-    paginas = _paginas_del_caso(cx)
+    """
+    Recorre el legajo y arma la lista de piezas. No escribe nada en la base.
+
+    Sólo mira las páginas que ninguna pieza cubre todavía. Eso es lo que hace que agregar
+    un PDF al legajo proponga la evidencia de ese PDF sin tocar lo ya revisado: antes, la
+    detección se salteaba entera si el caso tenía una sola pieza, y las páginas nuevas
+    quedaban sin proponer sin que nadie se enterara.
+
+    Un hueco corta la pieza abierta, sea porque esas páginas ya están cubiertas o porque
+    todavía no se leyeron. Estirar una pieza por encima de páginas que el sistema no
+    miró sería afirmar que son parte del mismo documento sin haberlo visto.
+    """
+    cubiertas = paginas_cubiertas(cx)
+    paginas = [p for p in _paginas_del_caso(cx) if p["numero_global"] not in cubiertas]
     if not paginas:
         return []
 
@@ -251,20 +302,30 @@ def proponer(cx: sqlite3.Connection) -> list[Pieza]:
         abierta.advertencias = adv
         piezas.append(abierta)
 
+    anterior: int | None = None
     for pag in paginas:
         lineas = lineas_de(cx, pag["id"], limite=LINEAS_ENCABEZADO)
         encabezado = normalizar_encabezado(lineas)
         tipo, fuerza = catalogo.reconocer(encabezado)
         continua = bool(_CONTINUACION.search(encabezado))
+        # Un hueco, o el principio de otro PDF, cierran la pieza abierta. Lo segundo
+        # porque una pieza que cruza dos archivos no se puede seguir representando con
+        # `pagina_inicio`/`pagina_fin` en cuanto alguien reordena los documentos: entre
+        # sus dos extremos aparecen páginas que nunca fueron de ella.
+        hueco = anterior is not None and (pag["numero_global"] != anterior + 1
+                                          or (abierta is not None
+                                              and pag["documento_id"] != abierta.documento_id))
 
         # La marca de continuación sólo tapa el corte cuando el título que pegó es del
         # MISMO tipo que la pieza abierta. Si aparece un título fuerte de otro tipo, se
         # corta igual, y es a propósito: entre partir de más y esconder una pieza
         # adentro de otra, lo segundo es lo que hace perder prueba. Partir de más se
         # arregla con dos clics; lo que quedó adentro de otra pieza no lo ve nadie.
-        sigue_lo_mismo = continua and abierta is not None and tipo.clave == abierta.tipo
-        arranca = abierta is None or (fuerza >= UMBRAL_CORTE and not sigue_lo_mismo)
+        sigue_lo_mismo = (continua and abierta is not None and not hueco
+                          and tipo.clave == abierta.tipo)
+        arranca = abierta is None or hueco or (fuerza >= UMBRAL_CORTE and not sigue_lo_mismo)
         if not arranca:
+            anterior = pag["numero_global"]
             textos.append(pag["texto"] or "")
             # La confianza de la pieza es la de la PEOR página que la compone, no el
             # promedio: si una de las seis fojas salió ilegible, la pieza entera merece
@@ -272,7 +333,10 @@ def proponer(cx: sqlite3.Connection) -> list[Pieza]:
             abierta.confianza_lectura = min(abierta.confianza_lectura, pag["confianza"] or 0)
             continue
 
-        cerrar(pag["numero_global"] - 1)
+        # La pieza que estaba abierta termina en la última página que entró en ella, que
+        # con huecos de por medio no es la anterior en la numeración.
+        cerrar(anterior if anterior is not None else pag["numero_global"] - 1)
+        anterior = pag["numero_global"]
         linea = _linea_titulo(lineas, tipo) if fuerza else (lineas[0] if lineas else None)
         descripcion = _frase(linea.texto) if linea else ""
         if not descripcion:
@@ -288,7 +352,7 @@ def proponer(cx: sqlite3.Connection) -> list[Pieza]:
             advertencias=[] if fuerza else ["sin_titulo"])
         textos = [pag["texto"] or ""]
 
-    cerrar(paginas[-1]["numero_global"])
+    cerrar(anterior if anterior is not None else paginas[-1]["numero_global"])
     return piezas
 
 
@@ -296,20 +360,33 @@ def guardar(cx: sqlite3.Connection, piezas: list[Pieza]) -> dict:
     """
     Escribe las piezas propuestas como evidencia `pendiente`.
 
-    NO toca lo que ya existe. Volver a correr la detección sobre un caso donde alguien
-    ya revisó no puede pisarle el trabajo: si hay evidencia automática previa, se
-    saltea y se devuelve el motivo. Para rehacerla hay que descartar la anterior a
-    propósito, que es una decisión y no un efecto secundario.
+    NO toca lo que ya existe: `proponer` sólo mira páginas que ninguna pieza cubre, así
+    que acá no hay nada que pisar. Lo que llega son piezas de páginas nuevas —un PDF que
+    se sumó al legajo— o de páginas cuyas propuestas apagó `rehacer`.
+
+    No confirma: la transacción la maneja quien llama, porque mirar la cobertura y
+    escribir tienen que ser una sola operación. Si no, dos detecciones simultáneas
+    —el trabajador de fondo y alguien apretando «detectar»— proponen las mismas páginas
+    y el legajo termina con cada pieza por duplicado.
     """
     ya = cx.execute("""SELECT COUNT(*) FROM evidencia
                         WHERE origen='automatica' AND activa=1""").fetchone()[0]
-    if ya:
-        return {"creadas": 0, "ya_habia": ya,
-                "motivo": "el caso ya tiene evidencia detectada; descartala antes de "
-                          "volver a detectar"}
+    # La cobertura se vuelve a mirar ACÁ, con la transacción de escritura ya tomada: la
+    # lista pudo haberse armado contra una foto vieja del caso. Una propuesta que pisa
+    # aunque sea una página ya cubierta se descarta entera —recortarle el rango sería
+    # cambiarle los límites a un documento que se leyó completo— y sus páginas libres las
+    # vuelve a proponer el pase siguiente.
+    cubiertas = paginas_cubiertas(cx)
+    pisadas = [p for p in piezas
+               if cubiertas & set(range(p.pagina_inicio, p.pagina_fin + 1))]
+    piezas = [p for p in piezas if p not in pisadas]
+    if not piezas:
+        return {"creadas": 0, "ya_habia": ya, "descartadas": len(pisadas),
+                "motivo": ("todas las páginas leídas ya tienen una pieza que las cubre"
+                           if ya else None)}
 
     ahora = db.ahora()
-    orden = 0
+    orden = cx.execute("SELECT COALESCE(MAX(orden_salida), 0) FROM evidencia").fetchone()[0]
     for p in piezas:
         orden += 1
         fi = cx.execute("SELECT foja_etiqueta FROM pagina WHERE numero_global=?",
@@ -329,10 +406,76 @@ def guardar(cx: sqlite3.Connection, piezas: list[Pieza]) -> dict:
              fi["foja_etiqueta"] if fi else None, ff["foja_etiqueta"] if ff else None,
              p.confianza, json.dumps(p.advertencias or [], ensure_ascii=False),
              p.fecha, orden, ahora))
-    cx.commit()
-    return {"creadas": len(piezas), "ya_habia": 0, "motivo": None}
+    return {"creadas": len(piezas), "ya_habia": ya, "descartadas": len(pisadas),
+            "motivo": None}
 
 
 def detectar(cx: sqlite3.Connection) -> dict:
-    """Proponer y guardar, de una."""
-    return guardar(cx, proponer(cx))
+    """Proponer y guardar, de una, como una sola operación (ver `db.candado_de_escritura`)."""
+    db.candado_de_escritura(cx)
+    try:
+        r = guardar(cx, proponer(cx))
+        cx.commit()
+    except Exception:
+        cx.rollback()
+        raise
+    return r
+
+
+# Una propuesta que nadie tocó: sin decisión, sin corrección, sin sector, sin testigo,
+# sin etiqueta y sin una sola fila en el historial. Es lo único que `rehacer` puede
+# reemplazar, porque es lo único donde no hay trabajo de nadie.
+_INTACTA = """
+      origen = 'automatica' AND activa = 1 AND estado = 'pendiente'
+  AND tipo_final IS NULL AND subtipo_final IS NULL AND descripcion_final IS NULL
+  AND foja_inicio_final IS NULL AND foja_fin_final IS NULL
+  AND observaciones IS NULL AND grupo_id IS NULL
+  AND NOT EXISTS (SELECT 1 FROM revision r         WHERE r.evidencia_id = evidencia.id)
+  AND NOT EXISTS (SELECT 1 FROM evidencia_persona p WHERE p.evidencia_id = evidencia.id)
+  AND NOT EXISTS (SELECT 1 FROM evidencia_etiqueta t WHERE t.evidencia_id = evidencia.id)
+  -- Haber resuelto un posible duplicado también es trabajo: si la propuesta se
+  -- reemplaza, el par vuelve a ofrecerse con identificadores nuevos y hay que decidirlo
+  -- de nuevo.
+  AND NOT EXISTS (SELECT 1 FROM duplicado_posible d
+                   WHERE (d.evidencia_a = evidencia.id OR d.evidencia_b = evidencia.id)
+                     AND d.estado <> 'abierto')"""
+
+
+def rehacer(cx: sqlite3.Connection) -> dict:
+    """
+    Vuelve a proponer, tirando sólo las propuestas que nadie tocó.
+
+    La versión anterior apagaba TODA la automática pendiente —descripciones corregidas y
+    testigos asignados incluidos— sin dejar rastro, y después no creaba nada, porque la
+    detección se salteaba si quedaba alguna automática activa. O sea: se llevaba trabajo
+    hecho y encima no rehacía nada.
+
+    Las que se apagan quedan anotadas en `revision`, que es append-only: se puede ver qué
+    propuesta reemplazó a cuál.
+    """
+    db.candado_de_escritura(cx)
+    try:
+        ahora = db.ahora()
+        reemplazadas = 0
+        for fila in cx.execute(f"SELECT id FROM evidencia WHERE {_INTACTA}").fetchall():
+            # La condición se repite en el UPDATE y no alcanza con el id: entre el SELECT
+            # y la escritura, otra pestaña puede haber incluido esa misma propuesta, y
+            # apagarla acá sería perder la decisión que alguien acaba de tomar.
+            cur = cx.execute(
+                f"UPDATE evidencia SET activa=0, actualizado_en=? WHERE id=? AND {_INTACTA}",
+                (ahora, fila["id"]))
+            if not cur.rowcount:
+                continue
+            cx.execute("""INSERT INTO revision (evidencia_id, campo, valor_anterior,
+                                                valor_nuevo, detalle, cuando)
+                          VALUES (?, 'rehacer_deteccion', 'activa', 'reemplazada',
+                                  'se volvió a correr la detección', ?)""", (fila["id"], ahora))
+            reemplazadas += 1
+        # Las dos cosas se confirman juntas. Si la detección falla, las propuestas viejas
+        # tienen que seguir donde estaban: media operación deja el caso sin piezas.
+        resultado = guardar(cx, proponer(cx))
+        cx.commit()
+    except Exception:
+        cx.rollback()
+        raise
+    return {**resultado, "reemplazadas": reemplazadas}

@@ -87,6 +87,7 @@ SELECT e.id FROM evidencia e JOIN rama r ON r.id = e.id
 
 _LINAJE_EXCLUIDO = _GENEALOGIA.format(aristas=_ARRIBA, condicion="e.estado = 'excluida'")
 _DERIVADAS_ACTIVAS = _GENEALOGIA.format(aristas=_ABAJO, condicion="e.activa = 1")
+_DERIVADAS = _GENEALOGIA.format(aristas=_ABAJO, condicion="1 = 1")
 
 
 def procedencia_excluida(cx: sqlite3.Connection, evidencia_id: int) -> list[int]:
@@ -119,6 +120,34 @@ def derivadas_activas(cx: sqlite3.Connection, evidencia_id: int,
 # se recupera deshaciendo esa unión.
 _EVENTOS_DE_APAGADO = ("descarte", "restauracion", "union", "division",
                        "deshacer_union", "deshacer_division")
+
+
+def representa_sus_paginas(cx: sqlite3.Connection, evidencia_id: int, activa: bool) -> bool:
+    """
+    ¿Esta fila sigue hablando por las páginas de su rango?
+
+    Sí cuando está activa, cuando una persona la descartó —descartar es decir «eso no es
+    una pieza», y esa decisión vale— y cuando lo que salió de ella sigue en pie, activo
+    o descartado: una parte absorbida por una unión está representada por esa unión, y
+    si la unión se descartó, el descarte alcanza también a las partes. Sin esto último,
+    descartar una unión de dos PDF devolvía a la lista las páginas del segundo, porque
+    la unión sólo cubre las de su propio documento.
+
+    No cuando la apagó un `deshacer` o una redetección: ahí la fila es un rastro del
+    historial y sus páginas las representa otra. Contarla igual hacía desaparecer de la
+    lista una pieza vecina que su rango tocaba de paso.
+    """
+    if activa or _descartada(cx, evidencia_id):
+        return True
+    for r in cx.execute(_DERIVADAS, (evidencia_id, evidencia_id)).fetchall():
+        fila = cx.execute("SELECT activa FROM evidencia WHERE id=?", (r["id"],)).fetchone()
+        if fila["activa"] or _descartada(cx, r["id"]):
+            return True
+    return False
+
+
+def _descartada(cx: sqlite3.Connection, evidencia_id: int) -> bool:
+    return _por_que_apagada(cx, evidencia_id) == "descarte"
 
 
 def _por_que_apagada(cx: sqlite3.Connection, evidencia_id: int) -> str | None:
@@ -282,8 +311,18 @@ def decidir(cx: sqlite3.Connection, evidencia_id: int, estado: str) -> dict:
     if estado == "incluida":
         _exigir_procedencia_limpia(cx, evidencia_id)
     if previo["estado"] != estado:
-        cx.execute("UPDATE evidencia SET estado=?, decidido_en=?, actualizado_en=? WHERE id=?",
-                   (estado, db.ahora(), db.ahora(), evidencia_id))
+        # La condición viaja en el UPDATE y no queda sólo en la lectura de arriba: entre
+        # una cosa y la otra, otra pestaña o el procesamiento de fondo pueden haber
+        # apagado la pieza, y contestar «guardado» sobre una fila que ya no está en la
+        # lista es la peor forma de fallar: la decisión se pierde sin que nadie lo sepa.
+        cur = cx.execute("""UPDATE evidencia SET estado=?, decidido_en=?, actualizado_en=?
+                             WHERE id=? AND activa=1""",
+                         (estado, db.ahora(), db.ahora(), evidencia_id))
+        if not cur.rowcount:
+            cx.rollback()
+            raise OperacionInvalida(
+                "esta pieza se apagó mientras la decidías: recargá la lista y fijate qué "
+                "la reemplazó")
         _anotar(cx, evidencia_id, "estado", previo["estado"], estado)
         cx.commit()
     return obtener(cx, evidencia_id)
@@ -313,8 +352,11 @@ def decidir_varias(cx: sqlite3.Connection, ids: list[int], estado: str) -> dict:
             continue
         if not previo["activa"] or previo["estado"] == estado:
             continue
-        cx.execute("UPDATE evidencia SET estado=?, decidido_en=?, actualizado_en=? WHERE id=?",
-                   (estado, db.ahora(), db.ahora(), eid))
+        cur = cx.execute("""UPDATE evidencia SET estado=?, decidido_en=?, actualizado_en=?
+                             WHERE id=? AND activa=1""",
+                         (estado, db.ahora(), db.ahora(), eid))
+        if not cur.rowcount:
+            continue
         _anotar(cx, eid, "estado", previo["estado"], estado, detalle="cambio en lote")
         cambiadas += 1
     cx.commit()
@@ -340,8 +382,12 @@ def editar(cx: sqlite3.Connection, evidencia_id: int, campos: dict) -> dict:
         anterior = previo[campo] if campo in previo.keys() else None
         if campo == "tipo" and valor and valor not in catalogo.POR_CLAVE:
             raise OperacionInvalida(f"tipo desconocido: {valor!r}")
-        cx.execute(f"UPDATE evidencia SET {columna}=?, actualizado_en=? WHERE id=?",
-                   (valor, db.ahora(), evidencia_id))
+        cur = cx.execute(f"UPDATE evidencia SET {columna}=?, actualizado_en=? "
+                         f"WHERE id=? AND activa=1", (valor, db.ahora(), evidencia_id))
+        if not cur.rowcount:
+            cx.rollback()
+            raise OperacionInvalida(
+                "esta pieza está apagada: la corrección no se guardó. Recargá la lista")
         _anotar(cx, evidencia_id, campo, anterior, valor)
         aplicados[campo] = valor
     if aplicados:
@@ -366,13 +412,23 @@ def reordenar(cx: sqlite3.Connection, ids: list[int], *, dentro_del_grupo: bool 
 
     Es la operación que sostiene «el generador nunca cambia por sí solo el orden
     aprobado»: acá se escribe, y en `generacion.py` se lee sin volver a ordenar.
+
+    Queda anotado en `revision`, y no es prolijidad: elegir el orden del escrito es
+    trabajo de una persona, y lo que no deja rastro en el historial es lo que la
+    redetección da por descartable y reemplaza.
     """
     columna = "orden_en_grupo" if dentro_del_grupo else "orden_salida"
+    movidas = 0
     for posicion, eid in enumerate(ids, start=1):
+        previo = cx.execute(f"SELECT {columna} FROM evidencia WHERE id=?", (eid,)).fetchone()
+        if previo is None or previo[columna] == posicion:
+            continue
         cx.execute(f"UPDATE evidencia SET {columna}=?, actualizado_en=? WHERE id=?",
                    (posicion, db.ahora(), eid))
+        _anotar(cx, eid, "orden", previo[columna], posicion, detalle=columna)
+        movidas += 1
     cx.commit()
-    return {"reordenadas": len(ids), "criterio": columna}
+    return {"reordenadas": movidas, "criterio": columna}
 
 
 # ────────────────────────────────────────────────────── crear, dividir, unir ──

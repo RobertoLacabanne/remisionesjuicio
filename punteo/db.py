@@ -80,6 +80,21 @@ def abrir(ruta: Path | None = None) -> sqlite3.Connection:
     return cx
 
 
+def candado_de_escritura(cx: sqlite3.Connection) -> None:
+    """
+    Toma el candado de escritura ANTES de leer lo que se va a controlar.
+
+    `BEGIN IMMEDIATE` y no el implícito de `sqlite3`, que abre la transacción recién en
+    el primer INSERT: todo lo que se leyó antes quedó afuera, y otra conexión pudo
+    cambiarlo en el medio. Dos detecciones proponían las mismas páginas; un punteo se
+    escribía con una pieza que otra pestaña acababa de excluir. Con el inmediato, la
+    otra conexión espera, y lo que se controla es lo que se escribe.
+    """
+    if cx.in_transaction:
+        cx.commit()
+    cx.execute("BEGIN IMMEDIATE")
+
+
 def ajuste(cx: sqlite3.Connection, clave: str, valor=None):
     """Lee o escribe un ajuste. Sin `valor`, lee."""
     if valor is None:

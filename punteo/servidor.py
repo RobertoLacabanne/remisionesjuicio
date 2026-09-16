@@ -367,15 +367,12 @@ def api_evidencias_lote(pet, slug: str, accion: str) -> dict:
 def api_detectar(pet, slug: str) -> dict:
     cx = _cx(slug)
     try:
-        if pet.cuerpo_json().get("rehacer"):
-            # Rehacer borra lo detectado automáticamente que nadie decidió todavía. Lo
-            # que una persona ya incluyó o excluyó NO se toca: el trabajo de revisión no
-            # se pierde por volver a correr la detección.
-            cx.execute("""UPDATE evidencia SET activa=0
-                           WHERE origen='automatica' AND estado='pendiente' AND activa=1""")
-            cx.commit()
-        return {**deteccion.detectar(cx), **duplicados.detectar(cx),
-                "contadores": modelo.contadores(cx)}
+        # `rehacer` reemplaza las propuestas que nadie tocó; sin él se detecta sólo sobre
+        # las páginas que todavía no tienen ninguna pieza. Ninguno de los dos pisa una
+        # corrección, una decisión ni un testigo asignado.
+        r = (deteccion.rehacer(cx) if pet.cuerpo_json().get("rehacer")
+             else deteccion.detectar(cx))
+        return {**r, **duplicados.detectar(cx), "contadores": modelo.contadores(cx)}
     finally:
         cx.close()
 
