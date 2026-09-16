@@ -83,6 +83,47 @@ def hace_falta_clave(host: str) -> bool:
     return not es_local(host)
 
 
+def host_de(cabecera: str) -> str:
+    """El nombre de la cabecera `Host`, sin el puerto y sin los corchetes de IPv6."""
+    h = (cabecera or "").strip()
+    if h.startswith("["):
+        return h[1:h.index("]")].lower() if "]" in h else ""
+    return (h.rsplit(":", 1)[0] if ":" in h else h).lower()
+
+
+def host_permitido(cabecera: str, escucha: str, con_clave: bool) -> bool:
+    """
+    ¿La dirección por la que llegó este pedido es una de las que este proceso reconoce?
+
+    Es la defensa contra el rebinding de DNS, que es la forma en que un legajo se escapa
+    de una máquina donde «todo está en 127.0.0.1». Un sitio cualquiera hace que su
+    dominio resuelva a 127.0.0.1; el navegador considera que su JavaScript y este
+    servidor son el MISMO ORIGEN —el del dominio— y desde ahí puede leer todo lo que
+    conteste la API y mandarlo a donde quiera. Escuchar en loopback no lo impide: la
+    cabecera `Host` es lo único que distingue «entraron por 127.0.0.1» de «entraron por
+    un dominio que apunta acá».
+
+    Con clave no hace falta: la cookie es `SameSite=Strict` y va atada al origen por el
+    que alguien entró, así que el pedido del atacante llega sin sesión.
+
+    `PUNTEO_HOSTS` existe para la instalación que sirve por un nombre propio —un alias
+    de la red de la fiscalía— sin poner clave. Es una decisión explícita, como
+    `PUNTEO_ACCESO=abierto`.
+    """
+    if con_clave:
+        return True
+    nombre = host_de(cabecera)
+    if not nombre:
+        return False
+    if es_local(nombre):
+        return True
+    permitidos = {h.strip().lower()
+                  for h in os.environ.get("PUNTEO_HOSTS", "").split(",") if h.strip()}
+    if escucha and not es_local(escucha) and escucha not in ("0.0.0.0", "::"):
+        permitidos.add(escucha.strip().lower())
+    return nombre in permitidos
+
+
 def direccion_en_la_red() -> str | None:
     """
     La IP de esta máquina en su red, para poder dictarla por teléfono.

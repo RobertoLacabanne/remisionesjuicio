@@ -150,5 +150,115 @@ class LaImagenEsLaDeLaPaginaQueSeEstaMirando(ConServidor):
         self.assertEqual(codigo, 200)
 
 
+class NadieCambiaElLegajoDeAfuera(ConServidor):
+    """
+    Dos cosas que se veían bien y no lo eran: que alcanzara con pedir una dirección para
+    apagar una pieza, y que cualquier sitio abierto en el mismo navegador pudiera mandar
+    ese pedido. Escuchar en 127.0.0.1 no protege de ninguna de las dos.
+    """
+
+    def _una_pieza(self) -> int:
+        cx = self.cx()
+        try:
+            from punteo.evidencia import modelo
+            return modelo.listar(cx)["evidencias"][0]["id"]
+        finally:
+            cx.close()
+
+    def _activa(self, eid: int) -> bool:
+        cx = self.cx()
+        try:
+            return bool(cx.execute("SELECT activa FROM evidencia WHERE id=?",
+                                   (eid,)).fetchone()["activa"])
+        finally:
+            cx.close()
+
+    def test_un_get_no_descarta_una_pieza(self):
+        eid = self._una_pieza()
+        codigo, cuerpo, cabeceras = self.pedir(
+            f"/api/caso/{self.caso.slug}/evidencia/{eid}/descartar")
+        self.assertEqual(codigo, 405, cuerpo)
+        self.assertIn("POST", cabeceras.get("Allow", ""))
+        self.assertTrue(self._activa(eid), "un GET apagó la pieza")
+
+    def test_un_get_no_deshace_ni_desagrupa(self):
+        eid = self._una_pieza()
+        for accion in ("restaurar", "deshacer", "grupo", "estado"):
+            codigo, _, _ = self.pedir(f"/api/caso/{self.caso.slug}/evidencia/{eid}/{accion}")
+            self.assertEqual(codigo, 405, accion)
+        self.assertTrue(self._activa(eid))
+
+    def test_un_pedido_de_otro_sitio_no_pasa(self):
+        eid = self._una_pieza()
+        for cabeceras in ({"Origin": "http://otro-sitio.example"},
+                          {"Sec-Fetch-Site": "cross-site"},
+                          {"Origin": f"http://127.0.0.1:{self.puerto + 1}"}):
+            codigo, cuerpo, _ = self.pedir(
+                f"/api/caso/{self.caso.slug}/evidencia/{eid}/descartar",
+                metodo="POST", cuerpo=b"{}", cabeceras=cabeceras)
+            self.assertEqual(codigo, 403, f"{cabeceras}: {cuerpo}")
+        self.assertTrue(self._activa(eid))
+
+    def test_el_pedido_de_la_propia_interfaz_si_pasa(self):
+        eid = self._una_pieza()
+        codigo, cuerpo, _ = self.pedir(
+            f"/api/caso/{self.caso.slug}/evidencia/{eid}/descartar", metodo="POST",
+            cuerpo=b"{}", cabeceras={"Origin": f"http://127.0.0.1:{self.puerto}",
+                                     "Sec-Fetch-Site": "same-origin",
+                                     "Content-Type": "application/json"})
+        self.assertEqual(codigo, 200, cuerpo)
+        self.assertFalse(self._activa(eid))
+        # Y se deja como estaba, que las pruebas de esta clase comparten el caso.
+        self.pedir(f"/api/caso/{self.caso.slug}/evidencia/{eid}/restaurar", metodo="POST",
+                   cuerpo=b"{}", cabeceras={"Origin": f"http://127.0.0.1:{self.puerto}"})
+
+    def test_una_direccion_que_no_es_la_de_este_servidor_no_pasa(self):
+        """
+        El rebinding de DNS: un dominio del atacante que resuelve a 127.0.0.1 queda como
+        mismo origen para el navegador, y desde ahí se lee el legajo entero. La cabecera
+        `Host` es lo único que lo distingue.
+        """
+        codigo, _, _ = self.pedir(f"/api/caso/{self.caso.slug}/evidencias",
+                                  cabeceras={"Host": "legajos.sitio-ajeno.example"})
+        self.assertEqual(codigo, 403)
+        codigo, _, _ = self.pedir("/api/estado", cabeceras={"Host": "localhost:8714"})
+        self.assertEqual(codigo, 200)
+
+
+class QueDireccionesSeAceptan(unittest.TestCase):
+
+    def setUp(self):
+        import os
+        self._antes = os.environ.pop("PUNTEO_HOSTS", None)
+        self.addCleanup(lambda: os.environ.__setitem__("PUNTEO_HOSTS", self._antes)
+                        if self._antes else None)
+
+    def test_las_de_esta_maquina(self):
+        from punteo import acceso
+        for h in ("127.0.0.1:8714", "localhost:8714", "[::1]:8714", "127.0.0.1"):
+            self.assertTrue(acceso.host_permitido(h, "127.0.0.1", False), h)
+
+    def test_ninguna_otra_mientras_no_haya_clave(self):
+        from punteo import acceso
+        for h in ("legajos.example", "192.168.1.40:8714", "", "  "):
+            self.assertFalse(acceso.host_permitido(h, "127.0.0.1", False), repr(h))
+
+    def test_con_clave_la_cookie_es_la_barrera(self):
+        from punteo import acceso
+        self.assertTrue(acceso.host_permitido("punteo.fiscalia.example", "0.0.0.0", True))
+
+    def test_se_puede_declarar_una_a_mano(self):
+        import os
+
+        from punteo import acceso
+        os.environ["PUNTEO_HOSTS"] = "punteo.ufil.local"
+        self.assertTrue(acceso.host_permitido("punteo.ufil.local:8714", "0.0.0.0", False))
+        self.assertFalse(acceso.host_permitido("otra.ufil.local", "0.0.0.0", False))
+
+    def test_la_direccion_de_escucha_se_acepta_sola(self):
+        from punteo import acceso
+        self.assertTrue(acceso.host_permitido("192.168.1.40:8714", "192.168.1.40", False))
+
+
 if __name__ == "__main__":
     unittest.main()

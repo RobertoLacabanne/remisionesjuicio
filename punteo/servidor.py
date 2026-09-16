@@ -40,11 +40,18 @@ _CANDADO = threading.Lock()
 # proceso escucha en otra dirección. Ver punteo/acceso.py.
 PORTERIA = acceso.Porteria(exigir=False)
 
+# En qué dirección escucha este proceso. Sirve para contestar «¿por dónde llegó este
+# pedido?»: ver `acceso.host_permitido`. `servir()` la fija con la real.
+ESCUCHA = config.HOST
+
 
 class ErrorHTTP(Exception):
-    def __init__(self, codigo: int, mensaje: str):
+    def __init__(self, codigo: int, mensaje: str, cabeceras: dict | None = None):
         super().__init__(mensaje)
         self.codigo, self.mensaje = codigo, mensaje
+        # Para los errores que tienen que decir algo más en la cabecera: un 405 sin
+        # `Allow` obliga a adivinar con qué método se pide la ruta.
+        self.cabeceras = cabeceras or {}
 
 
 def _procesador(slug: str) -> Procesador:
@@ -296,7 +303,24 @@ def api_evidencia(pet, slug: str, eid: str) -> dict:
         cx.close()
 
 
+# Con qué método se pide cada acción sobre una pieza. `historial` es lo único que se
+# lee; todo lo demás cambia el legajo y por eso va por POST —o por DELETE, cuando lo que
+# hace es sacar algo—.
+METODOS_DE_ACCION = {
+    "estado": ("POST",), "dividir": ("POST",), "descartar": ("POST",),
+    "restaurar": ("POST",), "deshacer": ("POST",), "grupo": ("POST",),
+    "historial": ("GET",), "etiqueta": ("POST", "DELETE"),
+    "testigo": ("POST", "DELETE"),
+}
+
+
 def api_evidencia_accion(pet, slug: str, eid: str, accion: str) -> dict:
+    metodos = METODOS_DE_ACCION.get(accion)
+    if metodos is None:
+        raise ErrorHTTP(404, f"acción desconocida: {accion}")
+    if pet.metodo not in metodos:
+        raise ErrorHTTP(405, f"«{accion}» se pide con {' o '.join(metodos)}, no con "
+                             f"{pet.metodo}", {"Allow": ", ".join(metodos)})
     cx = _cx(slug)
     try:
         i = _entero(eid, "evidencia")
@@ -550,40 +574,51 @@ def api_punteo_parrafo(pet, slug: str, pid: str) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════ la tabla ══
-# (método, patrón, función). El orden importa: gana el primero que pega.
+# (métodos, patrón, función). El orden importa: gana el primero que pega.
+#
+# Los métodos se declaran UNO POR UNO y ya no hay comodín. Con el comodín, un `GET` a
+# `/evidencia/12/descartar` apagaba la pieza: alcanzaba con que el navegador cargara esa
+# dirección —una etiqueta `<img>` en cualquier página, una precarga— para cambiar el
+# legajo. En HTTP, `GET` no puede cambiar nada, y acá eso se sostiene en la tabla y no
+# en que cada manejador se acuerde.
 RUTAS = [
-    ("GET",    r"/api/estado$",                                  api_estado),
-    ("GET",    r"/api/catalogo$",                                api_catalogo),
-    ("*",      r"/api/casos$",                                   api_casos),
-    ("*",      r"/api/caso/([\w-]+)$",                           api_caso),
-    ("*",      r"/api/caso/([\w-]+)/documentos$",                api_documentos),
-    ("POST",   r"/api/caso/([\w-]+)/documentos/orden$",          api_documentos_orden),
-    ("POST",   r"/api/caso/([\w-]+)/procesar$",                  api_procesar),
-    ("POST",   r"/api/caso/([\w-]+)/procesar/detener$",          api_detener),
-    ("GET",    r"/api/caso/([\w-]+)/progreso$",                  api_progreso),
-    ("GET",    r"/api/caso/([\w-]+)/paginas$",                   api_paginas),
-    ("GET",    r"/api/caso/([\w-]+)/pagina/(\d+)$",              api_pagina),
-    ("POST",   r"/api/caso/([\w-]+)/pagina/(\d+)/foja$",         api_pagina_foja),
-    ("*",      r"/api/caso/([\w-]+)/foliatura$",                 api_foliatura),
-    ("POST",   r"/api/caso/([\w-]+)/detectar$",                  api_detectar),
-    ("*",      r"/api/caso/([\w-]+)/evidencias$",                api_evidencias),
-    ("*",      r"/api/caso/([\w-]+)/evidencias/(\w+)$",          api_evidencias_lote),
-    ("*",      r"/api/caso/([\w-]+)/evidencia/(\d+)$",           api_evidencia),
-    ("*",      r"/api/caso/([\w-]+)/evidencia/(\d+)/(\w+)$",     api_evidencia_accion),
-    ("POST",   r"/api/caso/([\w-]+)/grupos/orden$",              api_grupos_orden),
-    ("*",      r"/api/caso/([\w-]+)/grupos$",                    api_grupos),
-    ("*",      r"/api/caso/([\w-]+)/grupo/(\d+)$",               api_grupo),
-    ("*",      r"/api/caso/([\w-]+)/personas$",                  api_personas),
-    ("*",      r"/api/caso/([\w-]+)/persona/(\d+)$",             api_persona),
-    ("POST",   r"/api/caso/([\w-]+)/fusiones$",                  api_fusiones),
-    ("GET",    r"/api/caso/([\w-]+)/testigos$",                  api_testigos),
-    ("*",      r"/api/caso/([\w-]+)/duplicados$",                api_duplicados),
-    ("GET",    r"/api/caso/([\w-]+)/buscar$",                    api_buscar),
-    ("GET",    r"/api/caso/([\w-]+)/punteo/verificar$",          api_punteo_verificar),
-    ("PATCH",  r"/api/caso/([\w-]+)/punteo/parrafo/(\d+)$",      api_punteo_parrafo),
-    ("*",      r"/api/caso/([\w-]+)/punteo$",                    api_punteo),
+    (("GET",),              r"/api/estado$",                             api_estado),
+    (("GET",),              r"/api/catalogo$",                           api_catalogo),
+    (("GET", "POST"),       r"/api/casos$",                              api_casos),
+    (("GET", "PATCH", "DELETE"), r"/api/caso/([\w-]+)$",                 api_caso),
+    (("GET", "POST"),       r"/api/caso/([\w-]+)/documentos$",           api_documentos),
+    (("POST",),             r"/api/caso/([\w-]+)/documentos/orden$",     api_documentos_orden),
+    (("POST",),             r"/api/caso/([\w-]+)/procesar$",             api_procesar),
+    (("POST",),             r"/api/caso/([\w-]+)/procesar/detener$",     api_detener),
+    (("GET",),              r"/api/caso/([\w-]+)/progreso$",             api_progreso),
+    (("GET",),              r"/api/caso/([\w-]+)/paginas$",              api_paginas),
+    (("GET",),              r"/api/caso/([\w-]+)/pagina/(\d+)$",         api_pagina),
+    (("POST",),             r"/api/caso/([\w-]+)/pagina/(\d+)/foja$",    api_pagina_foja),
+    (("GET", "POST"),       r"/api/caso/([\w-]+)/foliatura$",            api_foliatura),
+    (("POST",),             r"/api/caso/([\w-]+)/detectar$",             api_detectar),
+    (("GET", "POST"),       r"/api/caso/([\w-]+)/evidencias$",           api_evidencias),
+    (("POST",),             r"/api/caso/([\w-]+)/evidencias/(\w+)$",     api_evidencias_lote),
+    (("GET", "PATCH"),      r"/api/caso/([\w-]+)/evidencia/(\d+)$",      api_evidencia),
+    (("GET", "POST", "DELETE"),
+                            r"/api/caso/([\w-]+)/evidencia/(\d+)/(\w+)$", api_evidencia_accion),
+    (("POST",),             r"/api/caso/([\w-]+)/grupos/orden$",         api_grupos_orden),
+    (("GET", "POST"),       r"/api/caso/([\w-]+)/grupos$",               api_grupos),
+    (("PATCH", "DELETE"),   r"/api/caso/([\w-]+)/grupo/(\d+)$",          api_grupo),
+    (("GET", "POST"),       r"/api/caso/([\w-]+)/personas$",             api_personas),
+    (("PATCH", "DELETE"),   r"/api/caso/([\w-]+)/persona/(\d+)$",        api_persona),
+    (("POST",),             r"/api/caso/([\w-]+)/fusiones$",             api_fusiones),
+    (("GET",),              r"/api/caso/([\w-]+)/testigos$",             api_testigos),
+    (("GET", "POST"),       r"/api/caso/([\w-]+)/duplicados$",           api_duplicados),
+    (("GET",),              r"/api/caso/([\w-]+)/buscar$",               api_buscar),
+    (("GET",),              r"/api/caso/([\w-]+)/punteo/verificar$",     api_punteo_verificar),
+    (("PATCH",),            r"/api/caso/([\w-]+)/punteo/parrafo/(\d+)$", api_punteo_parrafo),
+    (("GET", "POST"),       r"/api/caso/([\w-]+)/punteo$",               api_punteo),
 ]
 RUTAS = [(m, re.compile(p), f) for m, p, f in RUTAS]
+
+# Métodos que cambian algo. Se controlan aparte, y el control está en el despacho para
+# que una ruta nueva no pueda olvidarse de él.
+MUTANTES = ("POST", "PATCH", "DELETE", "PUT")
 
 
 class Manejador(BaseHTTPRequestHandler):
@@ -624,6 +659,15 @@ class Manejador(BaseHTTPRequestHandler):
         self.cuerpo = self.rfile.read(largo) if largo else b""
 
         try:
+            # Por dónde llegó el pedido y desde dónde lo mandaron. Los dos controles van
+            # acá arriba, antes de cualquier ruta, por la misma razón que la puerta: un
+            # manejador nuevo se agrega sin acordarse de ellos.
+            if not acceso.host_permitido(self.cabecera("Host"), ESCUCHA, PORTERIA.exigir):
+                raise ErrorHTTP(403, "este pedido llegó por una dirección que este "
+                                     "servidor no reconoce")
+            if self.command in MUTANTES and not self._del_mismo_sitio():
+                raise ErrorHTTP(403, "este pedido viene de otro sitio")
+
             # LA PUERTA, antes que cualquier ruta. Va acá arriba y no en cada manejador
             # justamente porque un manejador nuevo se agrega sin acordarse del control,
             # y lo que queda abierto es un legajo penal.
@@ -638,25 +682,61 @@ class Manejador(BaseHTTPRequestHandler):
             if m and self.command == "GET":
                 return self._exportar(m.group(1), self.consulta("formato", "rtf"))
 
-            for metodo, patron, fn in RUTAS:
+            permitidos: list[str] = []
+            for metodos, patron, fn in RUTAS:
                 encontrado = patron.fullmatch(ruta)
                 if not encontrado:
                     continue
-                if metodo != "*" and metodo != self.command:
+                if self.command not in metodos:
+                    permitidos += [m for m in metodos if m not in permitidos]
                     continue
                 return self._json(200, fn(self, *encontrado.groups()))
+
+            if permitidos:
+                # La ruta existe pero no con este método. Se contesta 405 y no 404: 404
+                # diría que no existe, y quien la escribió tiene que ver la diferencia.
+                self.send_response(405)
+                cuerpo = json.dumps(
+                    {"error": f"{ruta} no se pide con {self.command}",
+                     "metodos": permitidos}, ensure_ascii=False).encode("utf-8")
+                self.send_header("Allow", ", ".join(permitidos))
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(cuerpo)))
+                self.end_headers()
+                return self.wfile.write(cuerpo)
 
             if ruta.startswith("/api/"):
                 raise ErrorHTTP(404, f"no existe {ruta}")
             return self._estatico(ruta)
 
         except ErrorHTTP as e:
-            self._json(e.codigo, {"error": e.mensaje})
+            self._json(e.codigo, {"error": e.mensaje}, cabeceras=e.cabeceras)
         except BrokenPipeError:
             pass                       # el navegador cerró; no es un error del servidor
         except Exception as e:
             traceback.print_exc()
             self._json(500, {"error": f"{type(e).__name__}: {e}"})
+
+    def _del_mismo_sitio(self) -> bool:
+        """
+        ¿Este pedido lo mandó la propia interfaz?
+
+        Un formulario o un `fetch` de otro sitio puede llegar igual a `127.0.0.1` desde
+        el navegador de quien está usando el sistema, y sin este control ese pedido
+        cambia el legajo: excluir piezas, descartar evidencia, borrar un caso. El
+        navegador dice de dónde viene en `Origin` y en `Sec-Fetch-Site`, y con eso
+        alcanza para distinguirlo.
+
+        Un pedido sin ninguna de las dos cabeceras se acepta: no viene de un navegador
+        —`curl`, una prueba, un script de la casa— y ahí no hay sitio ajeno que engañar.
+        """
+        sitio = (self.cabecera("Sec-Fetch-Site")).lower()
+        if sitio and sitio not in ("same-origin", "none"):
+            return False
+        origen = self.cabecera("Origin")
+        if not origen:
+            return True
+        return urlparse(origen).netloc.lower() == self.cabecera("Host").lower()
 
     def _paso_la_puerta(self, ruta: str) -> bool:
         """
@@ -718,9 +798,11 @@ class Manejador(BaseHTTPRequestHandler):
         return False
 
     # ── respuestas ──
-    def _json(self, codigo: int, datos) -> None:
+    def _json(self, codigo: int, datos, *, cabeceras: dict | None = None) -> None:
         cuerpo = json.dumps(datos, ensure_ascii=False, default=str).encode("utf-8")
         self.send_response(codigo)
+        for nombre, valor in (cabeceras or {}).items():
+            self.send_header(nombre, valor)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(cuerpo)))
         self.send_header("Cache-Control", "no-store")
@@ -817,9 +899,10 @@ class Manejador(BaseHTTPRequestHandler):
 
 
 def servir(puerto: int | None = None, host: str | None = None) -> None:
-    global PORTERIA
+    global PORTERIA, ESCUCHA
     puerto = puerto or config.PUERTO
     host = host or config.HOST
+    ESCUCHA = host
     config.carpeta_casos().mkdir(parents=True, exist_ok=True)
 
     # La puerta se decide por la dirección de escucha, no por una opción aparte: una

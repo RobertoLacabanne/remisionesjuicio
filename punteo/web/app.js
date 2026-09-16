@@ -757,8 +757,7 @@ function pintarFichaEvidencia(ev) {
   };
 
   $('#ev-historial').onclick = async () => {
-    const { historial } = await api(`/api/caso/${E.caso.slug}/evidencia/${ev.id}/historial`,
-      { metodo: 'POST', cuerpo: {} });
+    const { historial } = await api(`/api/caso/${E.caso.slug}/evidencia/${ev.id}/historial`);
     const dlg = $('#dlg');
     dlg.innerHTML = `<form method="dialog"><div class="dlg-cuerpo">
       <h2>Historial de la pieza #${ev.id}</h2>

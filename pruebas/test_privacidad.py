@@ -29,6 +29,13 @@ def _fuentes_python():
 
 class SinRed(unittest.TestCase):
 
+    # La única excepción, anotada acá y no en un comentario suelto para que agregar otra
+    # sea una decisión y no un descuido: `acceso.py` abre un socket UDP hacia una
+    # dirección que no existe y le pregunta al sistema operativo qué interfaz habría
+    # elegido, para poder mostrar en la terminal la IP que hay que dictar por teléfono.
+    # No se manda un solo paquete y no hay ninguna conexión. Está probado abajo.
+    IMPORTA_SOCKET = {"acceso.py"}
+
     def test_ningun_modulo_importa_biblioteca_de_red(self):
         prohibidos = re.compile(
             r"^\s*(?:import|from)\s+(urllib\.request|requests|httpx|aiohttp|socket|"
@@ -38,7 +45,23 @@ class SinRed(unittest.TestCase):
             # que sólo parsea cadenas. Están permitidos por nombre exacto.
             texto = p.read_text(encoding="utf-8")
             m = prohibidos.search(texto)
+            if m and m.group(1) == "socket" and p.name in self.IMPORTA_SOCKET:
+                continue
             self.assertIsNone(m, f"{p.name} importa {m.group(1) if m else ''}")
+
+    def test_el_unico_socket_no_manda_nada(self):
+        """
+        Lo que se permite arriba es preguntarle al sistema por su propia interfaz. Un
+        `connect` UDP no despierta tráfico; lo que lo despertaría es mandar algo, y eso
+        no puede aparecer.
+        """
+        import inspect
+
+        from punteo import acceso
+        codigo = inspect.getsource(acceso.direccion_en_la_red)
+        for prohibido in ("send", "recv", "SOCK_STREAM"):
+            self.assertNotIn(prohibido, codigo, f"el socket de acceso.py hace {prohibido}")
+        self.assertIn("SOCK_DGRAM", codigo)
 
     # Los espacios de nombres XML no son direcciones que se descarguen: son
     # identificadores, y el navegador jamás los pide. Están listados uno por uno y no
