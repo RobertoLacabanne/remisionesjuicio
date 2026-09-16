@@ -1189,14 +1189,26 @@ $('#generar-punteo').onclick = async () => {
                 exigir_foja_confirmada: $('#punteo-exigir-foja').checked },
     }));
     pintarPunteo(p);
-    avisar(`Punteo generado con ${p.total_piezas} piezas.`);
+    // Las ediciones a mano se arrastran sólo cuando la pieza no cambió en nada que salga
+    // al escrito. Las que no se pudieron traer no se perdieron —el punteo anterior queda
+    // entero en la base— pero hay que decirlo, o alguien las da por escritas.
+    const perdidas = p.ediciones_no_trasladadas
+      ? ` ${p.ediciones_no_trasladadas} párrafo(s) editados a mano no se trasladaron porque su pieza cambió.`
+      : '';
+    avisar(`Punteo generado con ${p.total_piezas} piezas.${perdidas}`, !!perdidas);
   } catch { /* ya avisó */ }
 };
 
 function pintarPunteo(p) {
   $('#tarjeta-salida').hidden = false;
-  if (p.revalidacion && !p.revalidacion.al_dia) {
-    avisar('El punteo quedó desactualizado: cambió alguna pieza desde que se generó. ' +
+  const r = p.revalidacion;
+  if (r && !r.al_dia) {
+    const motivos = [];
+    if (r.desactualizados.length) motivos.push(`${r.desactualizados.length} pieza(s) ya no están incluidas`);
+    if (r.cambiados.length) motivos.push(`${r.cambiados.length} pieza(s) cambiaron de texto —descripción, foja o testigo—`);
+    if (r.incluidas_nuevas) motivos.push(`${r.incluidas_nuevas} pieza(s) incluidas no están en el punteo`);
+    if (r.reordenado) motivos.push('cambió el orden');
+    avisar(`El punteo quedó desactualizado: ${motivos.join('; ')}. ` +
            'Volvé a generarlo antes de exportar.', true);
   }
   $('#punteo-salida').innerHTML = p.parrafos.map(pa => pa.clase === 'encabezado'

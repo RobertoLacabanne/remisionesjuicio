@@ -196,6 +196,45 @@ class LoExcluidoNoVuelvePorOtraPuerta(CasoDePrueba):
         self.cx.commit()
         with self.assertRaises(generacion.EvidenciaNoIncluida):
             generacion.generar(self.cx)
+        # Y no quedó un punteo a medio escribir: cortar en la mitad del armado deshace
+        # todo, porque un punteo con la mitad de las piezas es peor que ninguno.
+        self.assertEqual(
+            self.cx.execute("SELECT COUNT(*) FROM punteo_generado").fetchone()[0], 0)
+
+    def test_nadie_puede_excluir_en_el_medio_del_armado(self):
+        """
+        La segunda barrera controla y después se escribe. Si entre las dos cosas otra
+        pestaña puede excluir una pieza, el control ya no dice nada de lo que se guarda.
+        Mientras se arma el punteo, cualquier otra escritura tiene que esperar.
+        """
+        import sqlite3
+        from unittest import mock
+
+        from punteo import casos, generacion
+        from punteo.evidencia import modelo
+        ev = self.evidencias()[0]
+        modelo.decidir(self.cx, ev["id"], "incluida")
+        otra = casos.abrir(self.caso.slug)
+        self.addCleanup(otra.close)
+        otra.execute("PRAGMA busy_timeout = 0")
+
+        original = generacion._escribir
+        intentos = []
+
+        def excluir_en_el_medio(cx, parrafos, ajustes):
+            try:
+                otra.execute("UPDATE evidencia SET estado='excluida' WHERE id=?", (ev["id"],))
+                otra.commit()
+                intentos.append("pasó")
+            except sqlite3.OperationalError:
+                otra.rollback()
+                intentos.append("esperó")
+            return original(cx, parrafos, ajustes)
+
+        with mock.patch.object(generacion, "_escribir", excluir_en_el_medio):
+            generacion.generar(self.cx)
+        self.assertEqual(intentos, ["esperó"],
+                         "otra conexión pudo escribir en el medio del armado")
 
     def test_excluir_una_parte_despues_de_generar_frena_la_exportacion(self):
         from punteo import exportacion, generacion
@@ -260,6 +299,170 @@ class LoExcluidoNoVuelvePorOtraPuerta(CasoDePrueba):
         ev = self.evidencias()[0]
         modelo.descartar(self.cx, ev["id"])
         self.assertTrue(modelo.restaurar(self.cx, ev["id"])["activa"])
+
+
+class CorregirDespuesDeGenerar(CasoDePrueba):
+    """
+    El punteo se guarda como texto. Todo lo que se corrija después queda afuera de ese
+    texto, y el archivo sale con el dato viejo y con cara de estar al día: es la misma
+    falla que excluir una pieza después de generar, por los otros campos.
+    """
+
+    def _generar_con(self, cuantas=3):
+        from punteo import generacion
+        from punteo.evidencia import modelo
+        evs = self.evidencias()[:cuantas]
+        for e in evs:
+            modelo.decidir(self.cx, e["id"], "incluida")
+        generacion.generar(self.cx)
+        return evs
+
+    def test_corregir_la_descripcion_frena_la_exportacion(self):
+        from punteo import exportacion, generacion
+        from punteo.evidencia import modelo
+        evs = self._generar_con()
+        modelo.editar(self.cx, evs[0]["id"], {"descripcion": "Descripción corregida PP42"})
+
+        estado = generacion.revalidar(self.cx)
+        self.assertFalse(estado["al_dia"])
+        self.assertTrue(estado["cambiados"])
+        with self.assertRaises(exportacion.PunteoDesactualizado):
+            exportacion.a_texto(self.cx)
+        # Y al regenerar, sale el dato corregido.
+        generacion.generar(self.cx)
+        self.assertIn("PP42", exportacion.a_texto(self.cx))
+
+    def test_confirmar_la_foja_despues_de_generar_tambien_cuenta(self):
+        from punteo import exportacion, foliatura, generacion
+        evs = self._generar_con(1)
+        self.assertIn(generacion.FOJA_A_CONFIRMAR, exportacion.a_texto(self.cx))
+        foliatura.confirmar_tramo(self.cx, evs[0]["pagina_inicio"], evs[0]["pagina_fin"])
+        with self.assertRaises(exportacion.PunteoDesactualizado):
+            exportacion.a_texto(self.cx)
+        generacion.generar(self.cx)
+        self.assertNotIn(generacion.FOJA_A_CONFIRMAR, exportacion.a_texto(self.cx))
+
+    def test_asignar_un_testigo_despues_de_generar_tambien_cuenta(self):
+        from punteo import exportacion, generacion, personas
+        evs = self._generar_con(1)
+        p = personas.buscar_o_crear(self.cx, "NUEVO, Testigo")
+        personas.asociar(self.cx, evs[0]["id"], p["id"])
+        with self.assertRaises(exportacion.PunteoDesactualizado):
+            exportacion.a_texto(self.cx)
+
+    def test_reordenar_despues_de_generar_tambien_cuenta(self):
+        from punteo import exportacion, generacion
+        from punteo.evidencia import modelo
+        evs = self._generar_con()
+        modelo.reordenar(self.cx, [e["id"] for e in reversed(evs)])
+        self.assertTrue(generacion.revalidar(self.cx)["reordenado"])
+        with self.assertRaises(exportacion.PunteoDesactualizado):
+            exportacion.a_texto(self.cx)
+
+    def test_incluir_otra_pieza_despues_de_generar_frena_la_exportacion(self):
+        """
+        El escrito saldría sin una prueba que la persona decidió ofrecer. Es lo mismo que
+        exportar de más, pero al revés, y se nota menos.
+        """
+        from punteo import exportacion, generacion
+        from punteo.evidencia import modelo
+        self._generar_con(2)
+        modelo.decidir(self.cx, self.evidencias()[5]["id"], "incluida")
+        estado = generacion.revalidar(self.cx)
+        self.assertFalse(estado["al_dia"])
+        self.assertEqual(estado["incluidas_nuevas"], 1)
+        with self.assertRaises(exportacion.PunteoDesactualizado):
+            exportacion.a_texto(self.cx)
+
+    def test_cambiar_el_tipo_de_proceso_frena_la_exportacion(self):
+        """
+        En abreviado la frase no lleva testigo introductor y en remisión sí. Cambiar el
+        tipo de proceso después de generar deja un escrito redactado para el otro.
+        """
+        from punteo import casos, exportacion, generacion
+        casos.actualizar(self.caso.slug, tipo_proceso="abreviado")
+        self.reabrir()
+        self._generar_con(1)
+        self.assertNotIn("introducida al debate", exportacion.a_texto(self.cx))
+
+        casos.actualizar(self.caso.slug, tipo_proceso="remision")
+        self.reabrir()
+        self.assertFalse(generacion.revalidar(self.cx)["al_dia"])
+        with self.assertRaises(exportacion.PunteoDesactualizado):
+            exportacion.a_texto(self.cx)
+        generacion.generar(self.cx)
+        self.assertIn("introducida al debate", exportacion.a_texto(self.cx))
+
+    def test_la_edicion_de_un_encabezado_vuelve_a_su_propio_sector(self):
+        """
+        Dos sectores pueden tener el mismo encabezado. Los encabezados no tienen pieza,
+        así que sin la clave del sector la edición del segundo se pegaba en el primero.
+        """
+        from punteo import generacion, grupos
+        from punteo.evidencia import modelo
+        evs = self.evidencias()[:4]
+        for e in evs:
+            modelo.decidir(self.cx, e["id"], "incluida")
+        a = grupos.crear(self.cx, "Sector A", encabezado="DOCUMENTAL")
+        b = grupos.crear(self.cx, "Sector B", encabezado="DOCUMENTAL")
+        grupos.mover_varias(self.cx, [evs[0]["id"], evs[1]["id"]], a["id"])
+        grupos.mover_varias(self.cx, [evs[2]["id"], evs[3]["id"]], b["id"])
+
+        punteo = generacion.generar(self.cx, criterio="grupos")
+        encabezados = [p for p in punteo["parrafos"] if p["clase"] == "encabezado"]
+        self.assertEqual(len(encabezados), 2)
+        generacion.editar_parrafo(self.cx, encabezados[1]["id"], "SOLO EL SECTOR B")
+
+        nuevo = generacion.generar(self.cx, criterio="grupos")
+        textos = [p["texto"] for p in nuevo["parrafos"] if p["clase"] == "encabezado"]
+        self.assertEqual(textos, ["DOCUMENTAL", "SOLO EL SECTOR B"])
+
+    def test_un_punteo_intacto_se_exporta(self):
+        from punteo import exportacion, generacion
+        self._generar_con()
+        self.assertTrue(generacion.revalidar(self.cx)["al_dia"])
+        self.assertIn("PRUEBA OFRECIDA", exportacion.a_texto(self.cx))
+
+    def test_la_edicion_a_mano_sobrevive_si_su_pieza_no_cambio(self):
+        """
+        Regenerar no puede costar el texto que alguien escribió. Si la pieza no cambió en
+        nada que salga al escrito, su párrafo editado se traslada al punteo nuevo.
+        """
+        from punteo import exportacion, generacion
+        from punteo.evidencia import modelo
+        evs = self._generar_con()
+        punteo = generacion.leer(self.cx)
+        parrafo = next(x for x in punteo["parrafos"]
+                       if x["evidencia_id"] == evs[1]["id"])
+        generacion.editar_parrafo(self.cx, parrafo["id"], "Redacción propia MM55")
+        modelo.editar(self.cx, evs[0]["id"], {"descripcion": "Otra descripción"})
+
+        nuevo = generacion.generar(self.cx)
+        self.assertEqual(nuevo["ediciones_trasladadas"], 1)
+        self.assertEqual(nuevo["ediciones_no_trasladadas"], 0)
+        self.assertIn("MM55", exportacion.a_texto(self.cx))
+
+    def test_la_edicion_de_una_pieza_que_cambio_no_se_arrastra(self):
+        """
+        Al revés: si la pieza cambió, arrastrar la edición sería volver a escribir el
+        dato viejo arriba del corregido. Se avisa cuántas quedaron atrás, y el punteo
+        anterior sigue entero en la base.
+        """
+        from punteo import generacion
+        from punteo.evidencia import modelo
+        evs = self._generar_con()
+        punteo = generacion.leer(self.cx)
+        parrafo = next(x for x in punteo["parrafos"] if x["evidencia_id"] == evs[0]["id"])
+        generacion.editar_parrafo(self.cx, parrafo["id"], "Redacción vieja con la foja de antes")
+        modelo.editar(self.cx, evs[0]["id"], {"descripcion": "Descripción corregida"})
+
+        nuevo = generacion.generar(self.cx)
+        self.assertEqual(nuevo["ediciones_no_trasladadas"], 1)
+        self.assertIn("Descripción corregida",
+                      " ".join(x["texto"] for x in nuevo["parrafos"]))
+        viejo = generacion.leer(self.cx, punteo["id"])
+        self.assertIn("Redacción vieja",
+                      " ".join(x["texto"] for x in viejo["parrafos"]))
 
 
 class LoCorregidoEsLoQueSale(CasoDePrueba):

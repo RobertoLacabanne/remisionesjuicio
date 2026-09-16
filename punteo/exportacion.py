@@ -42,6 +42,24 @@ def _control_previo(cx: sqlite3.Connection, punteo_id: int | None) -> dict:
         raise PunteoDesactualizado(
             f"{len(estado['desactualizados'])} párrafo(s) del punteo ya no corresponden "
             f"a evidencia incluida: {detalle}. Volvé a generar el punteo antes de exportar.")
+    # Lo mismo vale para lo que cambió DESPUÉS de generar: corregir una descripción,
+    # confirmar una foja o asignar un testigo deja el texto guardado diciendo lo de
+    # antes. Se exportaba igual, sin ninguna señal de que el archivo ya no era el caso.
+    if estado["cambiados"]:
+        detalle = "; ".join(f"{d['numero']} decía «{d['texto']}…» y ahora es «{d['ahora']}…»"
+                            for d in estado["cambiados"][:3])
+        raise PunteoDesactualizado(
+            f"{len(estado['cambiados'])} párrafo(s) quedaron con datos viejos: {detalle}. "
+            f"Volvé a generar el punteo antes de exportar.")
+    if not estado["al_dia"]:
+        # Cualquier diferencia frena, y las categorías de arriba sólo sirven para
+        # explicar cuál. Controlar una por una dejaba pasar lo que no estuviera en la
+        # lista —una pieza incluida después, un encabezado de sector reescrito— y eso es
+        # un escrito al que le falta prueba ofrecida, que es el error que más caro sale.
+        faltan = (f"{estado['incluidas_nuevas']} pieza(s) incluidas no están en el punteo"
+                  if estado["incluidas_nuevas"] else "cambió algo desde que se generó")
+        raise PunteoDesactualizado(
+            f"el punteo no está al día: {faltan}. Volvé a generarlo antes de exportar.")
     return punteo
 
 

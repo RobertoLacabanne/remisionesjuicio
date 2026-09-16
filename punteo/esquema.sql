@@ -348,6 +348,10 @@ CREATE TABLE IF NOT EXISTS punteo_generado (
   con_encabezados INTEGER NOT NULL DEFAULT 1,
   numeracion    TEXT NOT NULL DEFAULT 'continua',   -- continua | por_grupo
   plantilla     TEXT,
+  -- Con qué exigencia se escribieron las fojas. Se guarda porque `revalidar` rearma el
+  -- punteo con los mismos parámetros para compararlo: sin esto, el rearmado saldría
+  -- distinto del guardado por una opción de pantalla y diría que hay cambios que no hay.
+  exigir_foja_confirmada INTEGER NOT NULL DEFAULT 1,
   total_piezas  INTEGER NOT NULL DEFAULT 0,
   generado_en   TEXT NOT NULL
 );
@@ -358,6 +362,11 @@ CREATE TABLE IF NOT EXISTS punteo_parrafo (
   orden        INTEGER NOT NULL,
   clase        TEXT NOT NULL,   -- encabezado | pieza
   evidencia_id INTEGER REFERENCES evidencia(id),
+  -- De qué sector es este encabezado: el id del grupo, la familia o el testigo, según el
+  -- criterio. NULL en los párrafos de pieza, que se identifican por su evidencia. Sirve
+  -- para volver a poner la edición a mano en el encabezado que le corresponde cuando se
+  -- regenera: con dos sectores llamados igual, el texto solo no alcanza.
+  clave_grupo  TEXT,
   numero       TEXT,            -- «1.-», «I.-»
   texto_generado TEXT NOT NULL, -- lo que armó el generador. No se pisa.
   texto_final    TEXT           -- lo que editó la persona. NULL = vale el generado.

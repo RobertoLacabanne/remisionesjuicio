@@ -336,27 +336,52 @@ def generar(cx: sqlite3.Connection, *, criterio: str = "manual",
     lo que sostiene poder editar el texto final sin perder la trazabilidad
     `párrafo ↔ evidencia`. Aplanar todo a un TEXTAREA la rompe en el primer guardado.
     """
+    # El armado —que es donde está la segunda barrera— y el guardado van adentro del
+    # mismo candado. Separados, otra pestaña podía excluir una pieza después de que la
+    # barrera la diera por buena y antes de escribirla, y el punteo salía con ella.
+    db.candado_de_escritura(cx)
+    try:
+        parrafos, ajustes = _armar(cx, criterio=criterio, con_encabezados=con_encabezados,
+                                   numeracion=numeracion, plantilla=plantilla,
+                                   exigir_foja_confirmada=exigir_foja_confirmada)
+        punteo_id, ediciones = _escribir(cx, parrafos, ajustes)
+    except Exception:
+        # Si una barrera corta en la mitad del armado, no puede quedar un punteo con la
+        # mitad de las piezas: eso se exporta igual y nadie ve que le falta un renglón.
+        cx.rollback()
+        raise
+    cx.commit()
+    return {**leer(cx, punteo_id), **ediciones}
+
+
+def _armar(cx: sqlite3.Connection, *, criterio: str, con_encabezados: bool,
+           numeracion: str, plantilla: str | None,
+           exigir_foja_confirmada: bool) -> tuple[list[dict], dict]:
+    """
+    El punteo, como lista de párrafos, SIN escribir nada.
+
+    Está separado del guardado para que `revalidar` pueda volver a armarlo con los mismos
+    parámetros y compararlo con lo guardado. Ahí está la única forma honesta de contestar
+    «¿este texto sigue diciendo lo que dicen las piezas hoy?»: rearmarlo y mirar. Una
+    lista de campos a comparar se queda vieja el día que alguien agrega uno.
+    """
     if criterio not in CRITERIOS:
         raise ValueError(f"criterio desconocido: {criterio!r}")
     caso = cx.execute("SELECT tipo_proceso FROM caso WHERE id=1").fetchone()
     tipo_proceso = caso["tipo_proceso"] if caso else "remision"
-    plantilla = plantilla or PLANTILLAS.get(tipo_proceso, PLANTILLAS["remision"])
+    # La plantilla ELEGIDA se guarda como vino, y `None` significa «la que corresponda al
+    # tipo de proceso». Guardar la ya resuelta escondía un cambio real: pasar el caso de
+    # abreviado a remisión no cambiaba el texto rearmado —la plantilla vieja ni siquiera
+    # tiene lugar para el testigo— y el punteo del proceso anterior pasaba por actual.
+    efectiva = plantilla or PLANTILLAS.get(tipo_proceso, PLANTILLAS["remision"])
 
     evidencias = _ordenar(_incluidas(cx), criterio)
     if not evidencias:
         raise NadaQueGenerar("no hay ninguna evidencia marcada para incluir")
 
-    punteo_id = cx.execute("""INSERT INTO punteo_generado (criterio, con_encabezados,
-                                                           numeracion, plantilla,
-                                                           total_piezas, generado_en)
-                              VALUES (?,?,?,?,?,?)""",
-                           (criterio, 1 if con_encabezados else 0, numeracion,
-                            plantilla, len(evidencias), db.ahora())).lastrowid
-
     agrupa = con_encabezados and criterio in ("grupos", "tipo", "testigo")
-    orden = 0
-    numero_pieza = 0
-    numero_grupo = 0
+    parrafos: list[dict] = []
+    numero_pieza = numero_grupo = 0
     grupo_actual = None
 
     for ev in evidencias:
@@ -370,26 +395,76 @@ def generar(cx: sqlite3.Connection, *, criterio: str = "manual",
                 numero_grupo += 1
                 if numeracion == "por_grupo":
                     numero_pieza = 0
-                encabezado = _encabezado_de(cx, ev, criterio)
-                orden += 1
-                cx.execute("""INSERT INTO punteo_parrafo (punteo_id, orden, clase,
-                                                          evidencia_id, numero,
-                                                          texto_generado)
-                              VALUES (?,?, 'encabezado', NULL, ?, ?)""",
-                           (punteo_id, orden, f"{romano(numero_grupo)}.-",
-                            encabezado.upper()))
+                parrafos.append({"clase": "encabezado", "evidencia_id": None,
+                                 "clave_grupo": str(clave),
+                                 "numero": f"{romano(numero_grupo)}.-",
+                                 "texto_generado": _encabezado_de(cx, ev, criterio).upper()})
 
         numero_pieza += 1
-        orden += 1
-        cx.execute("""INSERT INTO punteo_parrafo (punteo_id, orden, clase, evidencia_id,
-                                                  numero, texto_generado)
-                      VALUES (?,?, 'pieza', ?, ?, ?)""",
-                   (punteo_id, orden, ev["id"], f"{numero_pieza}.-",
-                    _parrafo(ev, tipo_proceso, plantilla, exigir_foja_confirmada,
-                             rango_discontinuo(cx, ev))))
+        parrafos.append({"clase": "pieza", "evidencia_id": ev["id"], "clave_grupo": None,
+                         "numero": f"{numero_pieza}.-",
+                         "texto_generado": _parrafo(ev, tipo_proceso, efectiva,
+                                                    exigir_foja_confirmada,
+                                                    rango_discontinuo(cx, ev))})
 
-    cx.commit()
-    return leer(cx, punteo_id)
+    ajustes = {"criterio": criterio, "con_encabezados": 1 if con_encabezados else 0,
+               "numeracion": numeracion, "plantilla": plantilla,
+               "exigir_foja_confirmada": 1 if exigir_foja_confirmada else 0,
+               "total_piezas": len(evidencias)}
+    return parrafos, ajustes
+
+
+def _escribir(cx: sqlite3.Connection, parrafos: list[dict], ajustes: dict) -> tuple[int, dict]:
+    """
+    Guarda el punteo armado y arrastra las ediciones a mano que siguen valiendo.
+
+    Un párrafo editado se traslada al punteo nuevo sólo si su texto generado es idéntico,
+    o sea si la pieza no cambió en nada que salga al escrito. Si cambió, la edición se
+    queda en el punteo anterior —que no se borra— y no se copia: arrastrarla sería
+    reescribir el dato viejo arriba del corregido, que es justamente lo que se está
+    arreglando. Se informa cuántas quedaron atrás para que nadie las dé por perdidas.
+    """
+    # La identidad de un párrafo es la pieza de la que salió; la de un encabezado, el
+    # sector. Sin la segunda, dos sectores con el mismo encabezado se llevaban la edición
+    # del otro: los encabezados no tienen `evidencia_id` y la clave quedaba sólo en su
+    # texto. Un encabezado viejo sin clave guardada no arrastra nada, que es lo correcto
+    # cuando no se puede saber de cuál era.
+    previas = {}
+    anterior = cx.execute(
+        "SELECT id FROM punteo_generado ORDER BY id DESC LIMIT 1").fetchone()
+    if anterior:
+        for p in cx.execute("""SELECT clase, evidencia_id, clave_grupo, texto_generado,
+                                      texto_final
+                                 FROM punteo_parrafo
+                                WHERE punteo_id=? AND texto_final IS NOT NULL""",
+                            (anterior["id"],)):
+            if p["clase"] == "encabezado" and p["clave_grupo"] is None:
+                continue
+            previas[(p["clase"], p["evidencia_id"], p["clave_grupo"],
+                     p["texto_generado"])] = p["texto_final"]
+
+    punteo_id = cx.execute(
+        """INSERT INTO punteo_generado (criterio, con_encabezados, numeracion, plantilla,
+                                        exigir_foja_confirmada, total_piezas, generado_en)
+           VALUES (?,?,?,?,?,?,?)""",
+        (ajustes["criterio"], ajustes["con_encabezados"], ajustes["numeracion"],
+         ajustes["plantilla"], ajustes["exigir_foja_confirmada"],
+         ajustes["total_piezas"], db.ahora())).lastrowid
+
+    trasladadas = 0
+    for orden, p in enumerate(parrafos, start=1):
+        clave = (p["clase"], p["evidencia_id"], p.get("clave_grupo"), p["texto_generado"])
+        texto_final = previas.pop(clave, None)
+        trasladadas += 1 if texto_final is not None else 0
+        cx.execute("""INSERT INTO punteo_parrafo (punteo_id, orden, clase, evidencia_id,
+                                                  clave_grupo, numero, texto_generado,
+                                                  texto_final)
+                      VALUES (?,?,?,?,?,?,?,?)""",
+                   (punteo_id, orden, p["clase"], p["evidencia_id"], p.get("clave_grupo"),
+                    p["numero"], p["texto_generado"], texto_final))
+
+    return punteo_id, {"ediciones_trasladadas": trasladadas,
+                       "ediciones_no_trasladadas": len(previas)}
 
 
 def _encabezado_de(cx: sqlite3.Connection, ev: dict, criterio: str) -> str:
@@ -469,12 +544,20 @@ def como_texto(cx: sqlite3.Connection, punteo_id: int | None = None) -> str:
 
 def revalidar(cx: sqlite3.Connection, punteo_id: int | None = None) -> dict:
     """
-    ¿El punteo guardado sigue reflejando lo que está incluido hoy?
+    ¿El punteo guardado sigue diciendo lo que dicen las piezas hoy?
 
-    Existe por un agujero concreto: se genera el punteo, después alguien excluye una
-    pieza, y el texto guardado sigue teniéndola. El texto no se actualiza solo —sería
-    pisarle la edición a quien lo esté corrigiendo— así que lo que se hace es AVISAR, y
-    la exportación se niega a escribir un párrafo cuya evidencia dejó de estar incluida.
+    Existe por un agujero concreto: se genera el punteo, después alguien cambia algo, y
+    el texto guardado sigue siendo el de antes. Excluir una pieza era el caso conocido,
+    pero corregir una descripción, confirmar una foja, asignar un testigo o cambiar el
+    orden tienen exactamente el mismo efecto y no se veían: el archivo salía con el dato
+    viejo y con cara de estar al día.
+
+    La comprobación es rearmar el punteo con los mismos parámetros y comparar. Enumerar
+    qué campos mirar sería empezar una lista que se queda vieja el día que alguien
+    agregue uno.
+
+    El texto no se actualiza solo —sería pisarle la edición a quien lo esté
+    corrigiendo—: se avisa, y la exportación se niega.
     """
     punteo = leer(cx, punteo_id)
     desactualizados = []
@@ -497,5 +580,40 @@ def revalidar(cx: sqlite3.Connection, punteo_id: int | None = None) -> dict:
                             WHERE id NOT IN (SELECT COALESCE(evidencia_id, -1)
                                                FROM punteo_parrafo WHERE punteo_id=?)""",
                         (punteo["id"],)).fetchone()[0]
-    return {"punteo_id": punteo["id"], "al_dia": not desactualizados and not nuevas,
-            "desactualizados": desactualizados, "incluidas_nuevas": nuevas}
+
+    try:
+        ahora, _ = _armar(cx, criterio=punteo["criterio"],
+                          con_encabezados=bool(punteo["con_encabezados"]),
+                          numeracion=punteo["numeracion"], plantilla=punteo["plantilla"],
+                          exigir_foja_confirmada=bool(punteo["exigir_foja_confirmada"]))
+    except (NadaQueGenerar, EvidenciaNoIncluida):
+        # Rearmar puede ser imposible: no quedó nada incluido, o una pieza arrastra
+        # material excluido. Las dos cosas significan que el punteo guardado no está al
+        # día, que es lo que esta función contesta; el detalle ya está en
+        # `desactualizados`. Acá se informa, no se aborta: abortar dejaría la pantalla
+        # del punteo sin poder abrirse justo cuando hay algo que arreglar.
+        ahora = []
+
+    clave = lambda p: (p["clase"], p["evidencia_id"], p["numero"], p["texto_generado"])
+    guardado = [clave(p) for p in punteo["parrafos"]]
+    rearmado = [clave(p) for p in ahora]
+
+    # Qué cambió, párrafo por párrafo, para poder decirlo con el texto a la vista.
+    nuevo_por_evidencia = {p["evidencia_id"]: p for p in ahora if p["clase"] == "pieza"}
+    cambiados = []
+    for p in punteo["parrafos"]:
+        if p["clase"] != "pieza" or not p["evidencia_id"]:
+            continue
+        equivalente = nuevo_por_evidencia.get(p["evidencia_id"])
+        if equivalente and equivalente["texto_generado"] != p["texto_generado"]:
+            cambiados.append({"parrafo_id": p["id"], "evidencia_id": p["evidencia_id"],
+                              "numero": p["numero"],
+                              "texto": p["texto_generado"][:90],
+                              "ahora": equivalente["texto_generado"][:90],
+                              "editado": bool(p["editado"])})
+    reordenado = (not desactualizados and not cambiados and not nuevas
+                  and guardado != rearmado)
+    return {"punteo_id": punteo["id"],
+            "al_dia": guardado == rearmado and not desactualizados and not nuevas,
+            "desactualizados": desactualizados, "cambiados": cambiados,
+            "reordenado": reordenado, "incluidas_nuevas": nuevas}
