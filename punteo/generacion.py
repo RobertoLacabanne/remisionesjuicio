@@ -116,6 +116,28 @@ def _incluidas(cx: sqlite3.Connection) -> list[dict]:
     return [como_dict(f) for f in cx.execute("SELECT * FROM v_evidencia_incluida")]
 
 
+# De qué piezas salió una pieza: las partes de una unión y el origen de una división,
+# hacia atrás. La consulta está escrita acá y no se importa de `evidencia/modelo.py` a
+# propósito: la segunda barrera vale justamente porque es otro código. Si la de allá
+# queda mal, ésta sigue en pie.
+_ORIGEN_EXCLUIDO = """
+WITH RECURSIVE linaje(id) AS (
+  SELECT ?
+  UNION
+  SELECT a.hacia FROM (
+      SELECT union_id AS desde, parte_id AS hacia FROM evidencia_parte
+      UNION ALL
+      SELECT id, origen_id FROM evidencia WHERE origen = 'division' AND origen_id IS NOT NULL
+  ) a JOIN linaje l ON a.desde = l.id
+)
+SELECT e.id FROM evidencia e JOIN linaje l ON l.id = e.id
+ WHERE e.id <> ? AND e.estado = 'excluida' ORDER BY e.id"""
+
+
+def _origen_excluido(cx: sqlite3.Connection, evidencia_id: int) -> list[int]:
+    return [r["id"] for r in cx.execute(_ORIGEN_EXCLUIDO, (evidencia_id, evidencia_id))]
+
+
 def _verificar_incluida(cx: sqlite3.Connection, ev: dict) -> None:
     """
     SEGUNDA BARRERA. Se relee el estado de la pieza desde la tabla, no desde la vista,
@@ -124,6 +146,10 @@ def _verificar_incluida(cx: sqlite3.Connection, ev: dict) -> None:
     Es redundante con la vista a propósito. El día que alguien agregue un segundo camino
     de generación, o cambie la vista, o pase una lista armada a mano, esta línea es la
     que evita que una pieza excluida termine en un escrito firmado.
+
+    Y se mira de dónde SALIÓ la pieza. Una unión copia la descripción de su primera parte
+    y una división la de su origen: si esa parte o ese origen están excluidos, el estado
+    propio de la pieza dice «incluida» y el texto que sale es el que se excluyó.
     """
     fila = cx.execute("SELECT estado, activa FROM evidencia WHERE id=?",
                       (ev["id"],)).fetchone()
@@ -132,6 +158,12 @@ def _verificar_incluida(cx: sqlite3.Connection, ev: dict) -> None:
         raise EvidenciaNoIncluida(
             f"la evidencia {ev['id']} llegó al generador con estado «{estado}» "
             f"(activa={fila['activa'] if fila else '—'}). Se abortó la generación.")
+    heredado = _origen_excluido(cx, ev["id"])
+    if heredado:
+        raise EvidenciaNoIncluida(
+            f"la evidencia {ev['id']} salió de "
+            f"{', '.join(str(i) for i in heredado)}, que está excluida, así que arrastra "
+            f"su texto. Se abortó la generación.")
 
 
 # ────────────────────────────────────────────────────────── chequeo previo ──
@@ -403,6 +435,11 @@ def revalidar(cx: sqlite3.Connection, punteo_id: int | None = None) -> dict:
                 "parrafo_id": p["id"], "evidencia_id": p["evidencia_id"],
                 "numero": p["numero"], "texto": p["texto"][:90],
                 "estado_actual": fila["estado"] if fila else "borrada"})
+        elif _origen_excluido(cx, p["evidencia_id"]):
+            desactualizados.append({
+                "parrafo_id": p["id"], "evidencia_id": p["evidencia_id"],
+                "numero": p["numero"], "texto": p["texto"][:90],
+                "estado_actual": "arrastra material excluido"})
     nuevas = cx.execute("""SELECT COUNT(*) FROM v_evidencia_incluida
                             WHERE id NOT IN (SELECT COALESCE(evidencia_id, -1)
                                                FROM punteo_parrafo WHERE punteo_id=?)""",

@@ -59,6 +59,86 @@ def _fila(cx: sqlite3.Connection, evidencia_id: int) -> sqlite3.Row:
     return f
 
 
+# Las aristas de la genealogía de una pieza: de una unión a cada una de sus partes, y de
+# una mitad a la pieza que se dividió. `_ARRIBA` va hacia atrás —de qué salió ésta— y
+# `_ABAJO` hacia adelante —qué salió de ésta—.
+#
+# Las aristas van en una subconsulta para que la parte recursiva nombre al CTE una sola
+# vez, que es lo que acepta cualquier SQLite y no sólo los nuevos. Y el recorrido usa
+# `UNION` y no `UNION ALL` para que una genealogía con un ciclo —deshacer y volver a unir
+# lo mismo— termine en lugar de girar para siempre.
+_ARRIBA = """SELECT union_id AS desde, parte_id AS hacia FROM evidencia_parte
+             UNION ALL
+             SELECT id, origen_id FROM evidencia
+              WHERE origen = 'division' AND origen_id IS NOT NULL"""
+_ABAJO = """SELECT parte_id AS desde, union_id AS hacia FROM evidencia_parte
+            UNION ALL
+            SELECT origen_id, id FROM evidencia
+             WHERE origen = 'division' AND origen_id IS NOT NULL"""
+
+_GENEALOGIA = """
+WITH RECURSIVE rama(id) AS (
+  SELECT ?
+  UNION
+  SELECT a.hacia FROM ({aristas}) a JOIN rama r ON a.desde = r.id
+)
+SELECT e.id FROM evidencia e JOIN rama r ON r.id = e.id
+ WHERE e.id <> ? AND {condicion} ORDER BY e.id"""
+
+_LINAJE_EXCLUIDO = _GENEALOGIA.format(aristas=_ARRIBA, condicion="e.estado = 'excluida'")
+_DERIVADAS_ACTIVAS = _GENEALOGIA.format(aristas=_ABAJO, condicion="e.activa = 1")
+
+
+def procedencia_excluida(cx: sqlite3.Connection, evidencia_id: int) -> list[int]:
+    """
+    Las piezas excluidas de las que salió ésta, por unión o por división.
+
+    Una pieza nueva hereda las páginas, el texto y la descripción de lo que la formó. Si
+    algo de eso estaba excluido, incluirla es sacar por la ventana lo que se excluyó por
+    la puerta: la descripción de la excluida llega al escrito con otro número de pieza.
+    """
+    return [r["id"] for r in cx.execute(_LINAJE_EXCLUIDO, (evidencia_id, evidencia_id))]
+
+
+def derivadas_activas(cx: sqlite3.Connection, evidencia_id: int,
+                      excepto: tuple[int, ...] = ()) -> list[int]:
+    """
+    Qué piezas activas salieron de ésta, en toda la cadena: la unión que la absorbió, la
+    unión que absorbió a esa unión, las mitades en que se partió.
+
+    Es lo que hay que mirar antes de volver a encender una fila: si lo que salió de ella
+    sigue en la lista, encenderla pone la misma prueba dos veces en el escrito.
+    """
+    fuera = set(excepto)
+    return [r["id"] for r in cx.execute(_DERIVADAS_ACTIVAS, (evidencia_id, evidencia_id))
+            if r["id"] not in fuera]
+
+
+# Lo que apagó o encendió una fila. Sirve para contestar POR QUÉ está apagada, que es
+# distinto de saber que lo está: una descartada se restaura, una absorbida por una unión
+# se recupera deshaciendo esa unión.
+_EVENTOS_DE_APAGADO = ("descarte", "restauracion", "union", "division",
+                       "deshacer_union", "deshacer_division")
+
+
+def _por_que_apagada(cx: sqlite3.Connection, evidencia_id: int) -> str | None:
+    fila = cx.execute(
+        f"""SELECT campo FROM revision WHERE evidencia_id = ?
+             AND campo IN ({','.join('?' * len(_EVENTOS_DE_APAGADO))})
+           ORDER BY id DESC LIMIT 1""",
+        (evidencia_id, *_EVENTOS_DE_APAGADO)).fetchone()
+    return fila["campo"] if fila else None
+
+
+def _exigir_procedencia_limpia(cx: sqlite3.Connection, evidencia_id: int) -> None:
+    excluidas = procedencia_excluida(cx, evidencia_id)
+    if excluidas:
+        raise OperacionInvalida(
+            f"la pieza #{evidencia_id} contiene material de "
+            f"{', '.join(f'#{i}' for i in excluidas)}, que está excluida: no se puede "
+            f"incluir. Deshacé la unión o la división y decidí de nuevo sobre las partes")
+
+
 def nivel_confianza(valor: float | None) -> str:
     if valor is None:
         return "manual"
@@ -199,6 +279,8 @@ def decidir(cx: sqlite3.Connection, evidencia_id: int, estado: str) -> dict:
     previo = _fila(cx, evidencia_id)
     if not previo["activa"]:
         raise OperacionInvalida("esta pieza está apagada: salió de una división o una unión")
+    if estado == "incluida":
+        _exigir_procedencia_limpia(cx, evidencia_id)
     if previo["estado"] != estado:
         cx.execute("UPDATE evidencia SET estado=?, decidido_en=?, actualizado_en=? WHERE id=?",
                    (estado, db.ahora(), db.ahora(), evidencia_id))
@@ -218,6 +300,11 @@ def decidir_varias(cx: sqlite3.Connection, ids: list[int], estado: str) -> dict:
     """
     if estado not in ESTADOS:
         raise OperacionInvalida(f"estado desconocido: {estado!r}")
+    # Se controla todo el lote antes de escribir nada: rechazar a mitad de camino dejaría
+    # la mitad de las piezas cambiadas y un mensaje de error que no dice cuáles.
+    if estado == "incluida":
+        for eid in ids:
+            _exigir_procedencia_limpia(cx, eid)
     cambiadas = 0
     for eid in ids:
         try:
@@ -343,10 +430,18 @@ def dividir(cx: sqlite3.Connection, evidencia_id: int, pagina_corte: int) -> dic
     que una mitad que la persona nunca miró entra al escrito porque el todo estaba
     aprobado. Entre dos teclas de más y una pieza ofrecida sin leer, el sistema elige
     las dos teclas.
+
+    **Una pieza excluida no se divide.** Las mitades heredan su descripción y su texto, y
+    como nacen pendientes, incluir una sacaría al escrito lo que la persona excluyó. Se
+    pide volverla a pendiente primero, que es una decisión que queda en el historial.
     """
     previo = _fila(cx, evidencia_id)
     if not previo["activa"]:
         raise OperacionInvalida("esta pieza ya está apagada")
+    if previo["estado"] == "excluida" or procedencia_excluida(cx, evidencia_id):
+        raise OperacionInvalida(
+            f"la pieza #{evidencia_id} está excluida o salió de una excluida: pasala a "
+            f"pendiente antes de dividirla")
     ini, fin = previo["pagina_inicio"], previo["pagina_fin"]
     if ini is None or fin is None:
         raise OperacionInvalida("la pieza no tiene rango de páginas")
@@ -400,10 +495,13 @@ def unir(cx: sqlite3.Connection, ids: list[int]) -> dict:
     """
     Junta varias piezas en una. Las partes quedan apagadas pero enteras.
 
-    Igual que la división: la unión nace `pendiente`. Y si alguna de las partes estaba
-    excluida, la unión se marca con una advertencia, porque el texto que la persona
-    había descartado ahora está adentro de una pieza nueva y tiene que saberlo antes de
-    incluirla.
+    Igual que la división: la unión nace `pendiente`.
+
+    **Una pieza excluida no se une.** La primera versión lo permitía con una advertencia
+    (`union_con_excluida`) y la advertencia no alcanzaba: la unión copia la descripción
+    de su primera parte, así que excluir A, unirla con B e incluir la unión sacaba al
+    escrito la descripción de A con A todavía excluida. Una advertencia se lee por encima
+    en la pieza número trescientos; una barrera no.
     """
     if len(ids) < 2:
         raise OperacionInvalida("hacen falta al menos dos piezas para unir")
@@ -412,6 +510,13 @@ def unir(cx: sqlite3.Connection, ids: list[int]) -> dict:
         raise OperacionInvalida("alguna de las piezas ya está apagada")
     if any(f["pagina_inicio"] is None for f in filas):
         raise OperacionInvalida("alguna de las piezas no tiene rango de páginas")
+    excluidas = [f["id"] for f in filas
+                 if f["estado"] == "excluida" or procedencia_excluida(cx, f["id"])]
+    if excluidas:
+        raise OperacionInvalida(
+            f"no se puede unir: {', '.join(f'#{i}' for i in excluidas)} está excluida o "
+            f"salió de una excluida. Pasala a pendiente primero: unirla metería en una "
+            f"pieza nueva texto que se decidió no ofrecer")
 
     filas.sort(key=lambda f: f["pagina_inicio"])
     ini = min(f["pagina_inicio"] for f in filas)
@@ -419,8 +524,6 @@ def unir(cx: sqlite3.Connection, ids: list[int]) -> dict:
     ahora = db.ahora()
 
     adv = []
-    if any(f["estado"] == "excluida" for f in filas):
-        adv.append("union_con_excluida")
     if len({f["tipo"] for f in filas}) > 1:
         adv.append("union_de_tipos_distintos")
 
@@ -467,12 +570,24 @@ def deshacer(cx: sqlite3.Connection, evidencia_id: int) -> dict:
     """
     fila = _fila(cx, evidencia_id)
     ahora = db.ahora()
+    if not fila["activa"]:
+        # Deshacer sobre una fila ya apagada reencendía lo que estaba adentro de otra
+        # pieza que sigue viva: la misma prueba quedaba dos veces en la lista.
+        raise OperacionInvalida(
+            "esta pieza está apagada: deshacé primero lo que la absorbió, o restaurala si "
+            "fue descartada")
     if fila["origen"] == "union":
         partes = [r["parte_id"] for r in cx.execute(
             "SELECT parte_id FROM evidencia_parte WHERE union_id=? ORDER BY orden",
             (evidencia_id,))]
         if not partes:
             raise OperacionInvalida("esta unión no tiene partes registradas")
+        for p in partes:
+            vivas = derivadas_activas(cx, p, excepto=(evidencia_id, *partes))
+            if vivas:
+                raise OperacionInvalida(
+                    f"la parte #{p} también está adentro de "
+                    f"{', '.join(f'#{i}' for i in vivas)}: deshacé eso primero")
         cx.execute("UPDATE evidencia SET activa=0, actualizado_en=? WHERE id=?", (ahora, evidencia_id))
         for p in partes:
             cx.execute("UPDATE evidencia SET activa=1, actualizado_en=? WHERE id=?", (ahora, p))
@@ -484,6 +599,11 @@ def deshacer(cx: sqlite3.Connection, evidencia_id: int) -> dict:
         hermanas = [r["id"] for r in cx.execute(
             "SELECT id FROM evidencia WHERE origen='division' AND origen_id=?",
             (fila["origen_id"],))]
+        vivas = derivadas_activas(cx, fila["origen_id"], excepto=tuple(hermanas))
+        if vivas:
+            raise OperacionInvalida(
+                f"alguna mitad de esta pieza quedó adentro de "
+                f"{', '.join(f'#{i}' for i in vivas)}: deshacé eso primero")
         for h in hermanas:
             cx.execute("UPDATE evidencia SET activa=0, actualizado_en=? WHERE id=?", (ahora, h))
         cx.execute("UPDATE evidencia SET activa=1, actualizado_en=? WHERE id=?",
@@ -514,6 +634,30 @@ def descartar(cx: sqlite3.Connection, evidencia_id: int) -> dict:
 
 
 def restaurar(cx: sqlite3.Connection, evidencia_id: int) -> dict:
+    """
+    Vuelve a encender una pieza DESCARTADA. Nada más que eso.
+
+    `activa = 0` también es lo que queda de una unión o una división, y encender una de
+    esas filas por este camino ponía la misma prueba dos veces en la lista —la parte y la
+    unión que la contiene— con la decisión vieja de la parte: una pieza incluida hace una
+    semana volvía al escrito sin que nadie la mirara. Para eso está `deshacer`.
+    """
+    fila = _fila(cx, evidencia_id)
+    if fila["activa"]:
+        return obtener(cx, evidencia_id)
+    motivo = _por_que_apagada(cx, evidencia_id)
+    if motivo != "descarte":
+        raise OperacionInvalida(
+            {"union": "esta pieza la absorbió una unión: para recuperarla, deshacé la unión",
+             "division": "esta pieza se dividió: para recuperarla, deshacé la división"}
+            .get(motivo, "esta pieza no se apagó por un descarte: no se restaura por acá"))
+    # Y aunque el último movimiento haya sido un descarte, lo que salió de ella puede
+    # seguir vivo por otro camino —una unión de uniones, una mitad absorbida después—.
+    vivas = derivadas_activas(cx, evidencia_id)
+    if vivas:
+        raise OperacionInvalida(
+            f"lo que salió de esta pieza sigue en la lista: "
+            f"{', '.join(f'#{i}' for i in vivas)}. Restaurarla pondría la misma prueba dos veces")
     cx.execute("UPDATE evidencia SET activa=1, actualizado_en=? WHERE id=?",
                (db.ahora(), evidencia_id))
     _anotar(cx, evidencia_id, "restauracion", "descartada", "activa")

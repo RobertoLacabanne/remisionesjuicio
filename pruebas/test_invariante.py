@@ -125,6 +125,143 @@ class ExcluidoNuncaSale(CasoDePrueba):
             generacion.generar(self.cx)
 
 
+class LoExcluidoNoVuelvePorOtraPuerta(CasoDePrueba):
+    """
+    Unir y dividir arman piezas NUEVAS con el texto de las viejas.
+
+    Es el camino por el que una excluida vuelve al escrito sin dejar de estar excluida:
+    la unión copia la descripción de su primera parte y la división la de su origen, y la
+    pieza nueva nace pendiente, con su propio número y sin nada que la ate a la decisión
+    anterior. El control por estado de la pieza no lo ve, porque el estado de la pieza
+    nueva es legítimo.
+    """
+
+    def _excluida_con_marca(self):
+        from punteo.evidencia import modelo
+        evs = self.evidencias()
+        victima = evs[0]
+        modelo.editar(self.cx, victima["id"], {"descripcion": "CADENA EXCLUIDA ZZUN"})
+        modelo.decidir(self.cx, victima["id"], "excluida")
+        return victima, evs
+
+    def test_no_se_une_una_pieza_excluida(self):
+        from punteo.evidencia import modelo
+        victima, evs = self._excluida_con_marca()
+        with self.assertRaises(modelo.OperacionInvalida):
+            modelo.unir(self.cx, [victima["id"], evs[1]["id"]])
+        # Y las piezas quedaron como estaban: el rechazo no apagó nada.
+        self.assertTrue(modelo.obtener(self.cx, victima["id"])["activa"])
+        self.assertTrue(modelo.obtener(self.cx, evs[1]["id"])["activa"])
+
+    def test_no_se_divide_una_pieza_excluida(self):
+        from punteo.evidencia import modelo
+        evs = self.evidencias()
+        larga = next(e for e in evs if e["pagina_fin"] > e["pagina_inicio"])
+        modelo.decidir(self.cx, larga["id"], "excluida")
+        with self.assertRaises(modelo.OperacionInvalida):
+            modelo.dividir(self.cx, larga["id"], larga["pagina_inicio"] + 1)
+
+    def test_una_union_que_ya_traia_una_excluida_no_se_puede_incluir(self):
+        """
+        El caso de una base armada antes de que unir controlara esto: la unión ya existe
+        y su parte quedó excluida. Incluirla tiene que fallar igual.
+        """
+        from punteo.evidencia import modelo
+        evs = self.evidencias()
+        union = modelo.unir(self.cx, [evs[0]["id"], evs[1]["id"]])
+        self.cx.execute("UPDATE evidencia SET estado='excluida' WHERE id=?", (evs[0]["id"],))
+        self.cx.commit()
+        with self.assertRaises(modelo.OperacionInvalida):
+            modelo.decidir(self.cx, union["id"], "incluida")
+        with self.assertRaises(modelo.OperacionInvalida):
+            modelo.decidir_varias(self.cx, [union["id"]], "incluida")
+
+    def _union_con_parte_excluida(self):
+        """Una unión incluida cuya parte quedó excluida, escrito a mano en la base."""
+        from punteo.evidencia import modelo
+        victima, evs = self._excluida_con_marca()
+        modelo.decidir(self.cx, victima["id"], "pendiente")
+        union = modelo.unir(self.cx, [victima["id"], evs[1]["id"]])
+        modelo.decidir(self.cx, union["id"], "incluida")
+        return victima, union
+
+    def test_la_segunda_barrera_ataja_la_union_con_parte_excluida(self):
+        """
+        Se saltea la decisión escribiendo el estado a mano, que es lo que deja una base
+        armada antes de esta regla, y el generador tiene que cortar igual.
+        """
+        from punteo import generacion
+        victima, _ = self._union_con_parte_excluida()
+        self.cx.execute("UPDATE evidencia SET estado='excluida' WHERE id=?", (victima["id"],))
+        self.cx.commit()
+        with self.assertRaises(generacion.EvidenciaNoIncluida):
+            generacion.generar(self.cx)
+
+    def test_excluir_una_parte_despues_de_generar_frena_la_exportacion(self):
+        from punteo import exportacion, generacion
+        victima, _ = self._union_con_parte_excluida()
+        generacion.generar(self.cx)
+        self.assertIn("ZZUN", exportacion.a_texto(self.cx))   # antes de excluir, sale
+
+        self.cx.execute("UPDATE evidencia SET estado='excluida' WHERE id=?", (victima["id"],))
+        self.cx.commit()
+        self.assertFalse(generacion.revalidar(self.cx)["al_dia"])
+        with self.assertRaises(exportacion.PunteoDesactualizado):
+            exportacion.a_texto(self.cx)
+
+    def test_restaurar_no_revive_una_parte_absorbida(self):
+        """
+        `activa = 0` también es lo que deja una unión. Encender esa fila por el camino de
+        «restaurar» ponía la misma prueba dos veces —la parte y la unión que la
+        contiene— con la decisión vieja de la parte.
+        """
+        from punteo.evidencia import modelo
+        evs = self.evidencias()
+        modelo.unir(self.cx, [evs[0]["id"], evs[1]["id"]])
+        with self.assertRaises(modelo.OperacionInvalida):
+            modelo.restaurar(self.cx, evs[0]["id"])
+        self.assertFalse(modelo.obtener(self.cx, evs[0]["id"])["activa"])
+
+    def test_restaurar_no_revive_una_parte_de_una_union_anidada(self):
+        """
+        La unión que absorbió a la parte puede estar apagada ella misma, absorbida por
+        otra: mirar sólo la unión directa deja pasar la cadena larga, y la parte vuelve
+        con su decisión vieja mientras la unión de arriba sigue en el escrito.
+        """
+        from punteo.evidencia import modelo
+        evs = self.evidencias()
+        u = modelo.unir(self.cx, [evs[0]["id"], evs[1]["id"]])
+        modelo.unir(self.cx, [u["id"], evs[2]["id"]])
+        with self.assertRaises(modelo.OperacionInvalida):
+            modelo.restaurar(self.cx, evs[0]["id"])
+        self.assertFalse(modelo.obtener(self.cx, evs[0]["id"])["activa"])
+
+    def test_no_se_deshace_una_union_que_ya_fue_absorbida(self):
+        from punteo.evidencia import modelo
+        evs = self.evidencias()
+        u = modelo.unir(self.cx, [evs[0]["id"], evs[1]["id"]])
+        v = modelo.unir(self.cx, [u["id"], evs[2]["id"]])
+        with self.assertRaises(modelo.OperacionInvalida):
+            modelo.deshacer(self.cx, u["id"])
+        self.assertTrue(modelo.obtener(self.cx, v["id"])["activa"])
+        # Deshaciendo desde arriba sí se puede, que es el orden que corresponde.
+        modelo.deshacer(self.cx, v["id"])
+        self.assertTrue(modelo.obtener(self.cx, u["id"])["activa"])
+
+    def test_restaurar_no_revive_una_pieza_ya_dividida(self):
+        from punteo.evidencia import modelo
+        larga = next(e for e in self.evidencias() if e["pagina_fin"] > e["pagina_inicio"])
+        modelo.dividir(self.cx, larga["id"], larga["pagina_inicio"] + 1)
+        with self.assertRaises(modelo.OperacionInvalida):
+            modelo.restaurar(self.cx, larga["id"])
+
+    def test_restaurar_sigue_devolviendo_lo_descartado(self):
+        from punteo.evidencia import modelo
+        ev = self.evidencias()[0]
+        modelo.descartar(self.cx, ev["id"])
+        self.assertTrue(modelo.restaurar(self.cx, ev["id"])["activa"])
+
+
 class LoCorregidoEsLoQueSale(CasoDePrueba):
     """La otra mitad: lo que corrigió una persona tapa lo que detectó la máquina."""
 

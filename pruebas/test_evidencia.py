@@ -80,16 +80,21 @@ class Unir(CasoDePrueba):
         for x in (a, b):
             self.assertFalse(modelo.obtener(self.cx, x["id"])["activa"])
 
-    def test_avisa_si_alguna_parte_estaba_excluida(self):
+    def test_no_se_une_si_alguna_parte_esta_excluida(self):
         """
-        El texto que la persona había descartado ahora está adentro de una pieza nueva y
-        tiene que enterarse antes de incluirla.
+        Antes esto salía con una advertencia. No alcanzaba: la unión copia la descripción
+        de su primera parte, así que el texto excluido llegaba al escrito adentro de una
+        pieza nueva que nadie relacionaba con la decisión anterior. Ahora hay que volver
+        la parte a pendiente, que es una decisión y queda en el historial.
         """
         from punteo.evidencia import modelo
         a, b = self.evidencias()[:2]
         modelo.decidir(self.cx, b["id"], "excluida")
+        with self.assertRaises(modelo.OperacionInvalida):
+            modelo.unir(self.cx, [a["id"], b["id"]])
+        modelo.decidir(self.cx, b["id"], "pendiente")
         u = modelo.unir(self.cx, [a["id"], b["id"]])
-        self.assertIn("union_con_excluida", u["advertencias"])
+        self.assertEqual(u["estado"], "pendiente")
 
     def test_deshacer_devuelve_las_partes(self):
         from punteo.evidencia import modelo
