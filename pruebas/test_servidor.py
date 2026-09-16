@@ -225,6 +225,29 @@ class NadieCambiaElLegajoDeAfuera(ConServidor):
         self.assertEqual(codigo, 200)
 
 
+class LaListaSePuedeControlar(ConServidor):
+    """
+    La interfaz junta la lista por tandas y después la compara contra la lista de
+    números completa. Eso sólo sirve si las dos vienen en el mismo orden estable.
+    """
+
+    def test_la_lista_de_numeros_coincide_con_las_tandas(self):
+        import json
+        base = f"/api/caso/{self.caso.slug}/evidencias"
+        _, cuerpo, _ = self.pedir(f"{base}?solo_ids=1")
+        control = json.loads(cuerpo)
+        juntadas, desde = [], 0
+        while True:
+            _, cuerpo, _ = self.pedir(f"{base}?desde={desde}&limite=1")
+            tanda = json.loads(cuerpo)
+            juntadas += [e["id"] for e in tanda["evidencias"]]
+            desde += len(tanda["evidencias"])
+            if not tanda["evidencias"] or desde >= tanda["total"]:
+                break
+        self.assertEqual(control["ids"], juntadas)
+        self.assertEqual(control["total"], len(juntadas))
+
+
 class QueDireccionesSeAceptan(unittest.TestCase):
 
     def setUp(self):

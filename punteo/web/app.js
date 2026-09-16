@@ -533,14 +533,61 @@ function pintarResalte(ev) {
 // queda apuntando a donde el texto ya no está.
 addEventListener('resize', () => { if (E.resalte) pintarResalte(E.resalte); });
 
+// De a cuántas piezas se piden. Es el tope del servidor: pedir más no trae más.
+const TANDA_EVIDENCIAS = 500;
+
+/**
+ * La lista de piezas, ENTERA, pedida de a tandas.
+ *
+ * La primera versión pedía una sola tanda de quinientas y listo: en un legajo con más
+ * piezas, la revisión terminaba en la quinientos y el checklist decía «500 de 812» sin
+ * forma de ver el resto. Las que quedaban afuera no se revisaban nunca, que es la
+ * omisión que el sistema existe para evitar.
+ *
+ * Pedir de a tandas tiene un agujero: si otra pestaña descarta una pieza entre una
+ * tanda y la siguiente, la ventana se corre y una pieza vigente queda afuera sin que el
+ * total lo delate. Por eso, al terminar, se pide la lista de números completa y se
+ * compara; si no coincide, se vuelve a cargar. Lo que manda es esa lista: su orden y
+ * sus piezas.
+ *
+ * Se conserva la pieza abierta por su número y no por su posición: si la lista cambió
+ * entre una carga y otra, la posición vieja apunta a otra pieza.
+ */
 async function cargarEvidencias(filtro = 'todas', orden = 'manual', texto = null) {
-  const q = new URLSearchParams({ filtro, orden, limite: '500' });
-  if (texto) q.set('q', texto);
-  const r = await api(`/api/caso/${E.caso.slug}/evidencias?${q}`);
-  E.evidencias = r.evidencias;
+  const abierta = E.evidencias[E.indice] ? E.evidencias[E.indice].id : null;
+  const base = new URLSearchParams({ filtro, orden });
+  if (texto) base.set('q', texto);
+  let todas = [], total = 0, completa = false;
+  for (let intento = 0; intento < 3 && !completa; intento++) {
+    const porId = new Map();
+    let desde = 0;
+    for (;;) {
+      const q = new URLSearchParams(base);
+      q.set('desde', String(desde)); q.set('limite', String(TANDA_EVIDENCIAS));
+      const r = await api(`/api/caso/${E.caso.slug}/evidencias?${q}`);
+      for (const ev of r.evidencias) porId.set(ev.id, ev);
+      desde += r.evidencias.length;
+      if (!r.evidencias.length || desde >= r.total) break;
+    }
+    const q = new URLSearchParams(base);
+    q.set('solo_ids', '1');
+    const control = await api(`/api/caso/${E.caso.slug}/evidencias?${q}`);
+    total = control.total;
+    completa = control.ids.every(id => porId.has(id));
+    todas = control.ids.filter(id => porId.has(id)).map(id => porId.get(id));
+  }
+  if (!completa) {
+    avisar('La lista de piezas cambió mientras se cargaba y no se pudo juntar entera. ' +
+           'Recargá la pantalla antes de seguir revisando.', true);
+  }
+  E.evidencias = todas;
+  if (abierta !== null) {
+    const i = todas.findIndex(x => x.id === abierta);
+    E.indice = i >= 0 ? i : Math.min(E.indice, todas.length - 1);
+  }
   const c = await api(`/api/caso/${E.caso.slug}`);
   E.contadores = c.contadores || {};
-  return r;
+  return { total, evidencias: todas };
 }
 
 async function abrirEvidencia(indice) {
@@ -868,6 +915,7 @@ async function cargarChecklist() {
   const orden = $('#filtro-orden').value;
   const texto = $('#filtro-texto').value.trim() || null;
   const r = await cargarEvidencias(filtro, orden, texto);
+  E.filasVisibles = FILAS_POR_TANDA;
   pintarContadores();
   if (E.modoCheck === 'grupos') pintarChecklistGrupos();
   else pintarChecklistLista(r.total);
@@ -897,8 +945,14 @@ function pintarContadores() {
 
 const MARCA_ESTADO = { incluida: '✓', excluida: '✕', pendiente: '○' };
 
+// Cuántas filas se dibujan de entrada en el checklist. Los datos están todos cargados;
+// lo que se dosifica es el DOM, que con miles de filas es lo que hace esperar.
+const FILAS_POR_TANDA = 500;
+
 function pintarChecklistLista(total) {
-  const filas = E.evidencias.map(e => `
+  const visibles = E.evidencias.slice(0, E.filasVisibles || FILAS_POR_TANDA);
+  const faltan = E.evidencias.length - visibles.length;
+  const filas = visibles.map(e => `
     <tr class="fila ${E.seleccion.has(e.id) ? 'elegida' : ''}" data-id="${e.id}">
       <td class="c-sel"><input type="checkbox" ${E.seleccion.has(e.id) ? 'checked' : ''}></td>
       <td class="c-estado ${e.estado}" title="${e.estado}">${MARCA_ESTADO[e.estado]}</td>
@@ -922,7 +976,7 @@ function pintarChecklistLista(total) {
       </tr></thead>
       <tbody>${filas}</tbody>
     </table>
-    <div class="solo-angosto">${E.evidencias.map(e => `
+    <div class="solo-angosto">${visibles.map(e => `
       <button class="ficha-ev" data-id="${e.id}">
         <div class="fe-cab"><span class="sello ${e.estado}">${e.estado}</span>
           <b>${esc(e.tipo_etiqueta)}</b></div>
@@ -931,7 +985,13 @@ function pintarChecklistLista(total) {
           <span>pág. ${e.pagina_inicio}</span>
           <span>${esc(e.testigo) || 'sin testigo'}</span></div>
       </button>`).join('')}</div>
-    <p class="pie-estado">${E.evidencias.length} de ${total} piezas mostradas</p>`;
+    <p class="pie-estado">${visibles.length} de ${total} piezas mostradas
+      ${faltan ? `<button class="boton" id="mostrar-mas">Mostrar ${Math.min(faltan, FILAS_POR_TANDA)} más</button>` : ''}</p>`;
+  const mas = $('#mostrar-mas');
+  if (mas) mas.onclick = () => {
+    E.filasVisibles = visibles.length + FILAS_POR_TANDA;
+    pintarChecklistLista(total);
+  };
 
   $$('#cuerpo-checklist tr.fila').forEach(tr => {
     tr.onclick = ev => {
@@ -949,7 +1009,9 @@ function pintarChecklistLista(total) {
     b.onclick = () => irARevision(Number(b.dataset.id)));
   const todas = $('#sel-todas');
   if (todas) todas.onchange = e => {
-    E.seleccion = e.target.checked ? new Set(E.evidencias.map(x => x.id)) : new Set();
+    // Elige las que se ven, no las cargadas: marcar de un clic filas que nadie tiene en
+    // pantalla es cambiar en lote piezas que nadie miró.
+    E.seleccion = e.target.checked ? new Set(visibles.map(x => x.id)) : new Set();
     pintarChecklistLista(total); pintarLote();
   };
   pintarLote();

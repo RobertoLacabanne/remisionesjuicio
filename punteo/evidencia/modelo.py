@@ -269,10 +269,16 @@ _FILTROS = {
 
 def listar(cx: sqlite3.Connection, *, filtro: str = "todas", orden: str = "manual",
            texto: str | None = None, grupo_id: int | None = None,
-           tipo: str | None = None, desde: int = 0, limite: int = 200) -> dict:
+           tipo: str | None = None, desde: int = 0, limite: int = 200,
+           solo_ids: bool = False) -> dict:
     """
     El checklist. Paginado siempre: una lista de ochocientas piezas en el DOM es lo que
     convierte una herramienta rápida en una que hay que esperar.
+
+    `solo_ids` devuelve la lista entera, pero sólo los números y en el orden pedido. Es
+    lo que usa la interfaz para comprobar que juntó todas las tandas: si otra pestaña
+    descarta una pieza entre una tanda y la siguiente, el desplazamiento corre la
+    ventana y una pieza vigente queda afuera sin que el total lo delate.
     """
     condiciones = ["activa = 1"]
     params: list = []
@@ -290,10 +296,17 @@ def listar(cx: sqlite3.Connection, *, filtro: str = "todas", orden: str = "manua
         params += [f"%{texto}%"] * 3
 
     donde = " AND ".join(condiciones)
+    # `id` al final del orden: con empates, sin él dos consultas pueden devolver las
+    # mismas filas en distinto orden, y las tandas se pisan o dejan huecos.
+    orden_sql = f"{_ORDENES.get(orden, _ORDENES['manual'])}, id"
+    if solo_ids:
+        ids = [r["id"] for r in cx.execute(
+            f"SELECT id FROM v_evidencia WHERE {donde} ORDER BY {orden_sql}", params)]
+        return {"total": len(ids), "ids": ids}
     total = cx.execute(f"SELECT COUNT(*) FROM v_evidencia WHERE {donde}", params).fetchone()[0]
     filas = cx.execute(
         f"SELECT * FROM v_evidencia WHERE {donde} "
-        f"ORDER BY {_ORDENES.get(orden, _ORDENES['manual'])} LIMIT ? OFFSET ?",
+        f"ORDER BY {orden_sql} LIMIT ? OFFSET ?",
         (*params, limite, desde)).fetchall()
     return {"total": total, "desde": desde, "limite": limite,
             "evidencias": [como_dict(f) for f in filas]}

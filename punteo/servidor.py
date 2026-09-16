@@ -282,7 +282,8 @@ def api_evidencias(pet, slug: str) -> dict:
                      if pet.consulta("grupo") not in (None, "") else None,
             tipo=pet.consulta("tipo"),
             desde=_entero(pet.consulta("desde"), "desde", 0),
-            limite=min(500, _entero(pet.consulta("limite"), "limite", 200)))
+            limite=min(500, _entero(pet.consulta("limite"), "limite", 200)),
+            solo_ids=pet.consulta("solo_ids") == "1")
     finally:
         cx.close()
 
