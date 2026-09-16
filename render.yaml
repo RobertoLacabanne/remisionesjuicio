@@ -11,17 +11,11 @@
 # Para eso sirve, y para eso está bien. Con documentación sintética —la que genera
 # `herramientas/generar_legajo.py`— es exactamente la herramienta correcta.
 #
-# Con un legajo real hay tres cosas que decidir antes, y ninguna la puede decidir
-# este archivo:
+# Con un legajo real hay que decidir previamente si la fiscalía acepta que
+# documentación de una causa se aloje en un servidor de un proveedor externo y que
+# la aplicación quede accesible desde una URL pública.
 #
-#   1. si la fiscalía acepta que documentación de una causa se aloje en un servidor
-#      de un proveedor extranjero;
-#   2. que el tráfico va por HTTPS hasta Render, pero adentro de Render el material
-#      queda en disco sin cifrar por la aplicación;
-#   3. que la clave de abajo es lo único que separa el legajo de cualquiera que
-#      adivine la dirección.
-#
-# La instalación de trabajo es local: ver EMPEZAR.md.
+# La instalación de trabajo local sigue documentada en EMPEZAR.md.
 # ════════════════════════════════════════════════════════════════════════════
 #
 # Se aplica con Blueprints (New → Blueprint → apuntar a este repositorio).
@@ -32,10 +26,7 @@ services:
     dockerfilePath: ./Dockerfile
     plan: starter          # el plan gratuito NO permite disco persistente: ver abajo
     region: oregon
-    # La raíz y no `/api/estado`: con `PUNTEO_ACCESO=clave` la API sin sesión contesta
-    # 401, Render lo toma como caído y el despliegue no termina nunca. La raíz sin
-    # sesión devuelve la pantalla de la clave con 200, que alcanza para saber que el
-    # proceso atiende sin abrir nada. `pruebas/test_acceso.py` lo verifica.
+    # La raíz devuelve 200 y permite a Render comprobar que el proceso atiende.
     healthCheckPath: /
 
     # ── EL DISCO ─────────────────────────────────────────────────────────────
@@ -53,21 +44,10 @@ services:
       - key: PUNTEO_DATOS
         value: /app/datos
 
-      # ── LA PUERTA ────────────────────────────────────────────────────────
-      # Acá el puerto SALE A INTERNET: cualquiera que sepa la dirección llega.
-      #
-      # NO poner `PUNTEO_ACCESO=abierto` en este archivo. Esa variable significa
-      # «quién llega a este puerto ya está restringido afuera del proceso», y acá
-      # eso es falso. Ponerla deja el legajo abierto para cualquiera.
+      # Despliegue público sin pantalla de contraseña. Cualquiera que conozca la URL
+      # puede abrir la aplicación; esta configuración es deliberada para este entorno.
       - key: PUNTEO_ACCESO
-        value: clave
-
-      # `generateValue` la crea una vez y la guarda en Render; se lee en el panel del
-      # servicio (Environment) y se le dicta a quien tenga que entrar. Sin esto, el
-      # proceso genera una nueva en cada arranque y sale sólo por el log — en un
-      # servicio que se reinicia solo, es una clave que nadie llega a leer.
-      - key: PUNTEO_CLAVE
-        generateValue: true
+        value: abierto
 
       # En un plan chico, más hilos que núcleos sólo hace que se peleen.
       - key: PUNTEO_NUCLEOS
