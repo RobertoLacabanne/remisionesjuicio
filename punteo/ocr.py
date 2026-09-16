@@ -1,12 +1,13 @@
 """
 Lectura de página — texto con coordenadas.
 
-Dos rutas, y la página decide cuál:
+Tres rutas, y la página decide cuál:
 
   * el PDF trae capa de texto nativa  -> se lee directo, exacto, confianza 1,0;
-  * es un escaneo                     -> se rasteriza en memoria y va a Tesseract.
+  * es un escaneo                     -> se rasteriza en memoria y va a Tesseract;
+  * es un escaneo con texto encima    -> las dos cosas, juntas (ver `leer_pagina`).
 
-Las dos devuelven lo mismo: una lista de `Palabra` con su recuadro en PUNTOS PDF,
+Todas devuelven lo mismo: una lista de `Palabra` con su recuadro en PUNTOS PDF,
 origen arriba-izquierda. Esa unidad común es lo que permite resaltar en la imagen el
 fragmento que sustenta una pieza de evidencia.
 
@@ -28,7 +29,7 @@ from pathlib import Path
 
 import pymupdf
 import pytesseract
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from . import config, db
 
@@ -42,13 +43,18 @@ class Palabra:
 
 @dataclass
 class Lectura:
-    ruta: str                 # nativo | ocr
+    ruta: str                 # nativo | ocr | mixta
     palabras: list[Palabra]
     confianza: float
     ancho_pt: float
     alto_pt: float
     rotacion: int
     ms: int
+    # Qué parte de la hoja está tapada por imágenes, y si alguna puede tener texto que la
+    # capa nativa no trae. Sólo lo calcula la ruta nativa, y es lo que decide si además
+    # hace falta leer la imagen.
+    cobertura_imagen: float = 0.0
+    imagen_por_leer: bool = False
 
     @property
     def texto(self) -> str:
@@ -109,17 +115,128 @@ def detectar_rotacion(im: Image.Image) -> int:
 
 
 # ───────────────────────────────────────────────────────────── ruta: nativa ──
+def _imagenes(pag, palabras_sin_girar: list[Palabra]) -> tuple[float, bool]:
+    """
+    Qué fracción de la hoja ocupan las imágenes, y si alguna puede tener texto sin leer.
+
+    La fracción sola no alcanza. Un escaneo es una imagen del tamaño de la página, pero
+    un acta escaneada pegada al cuarenta por ciento de una hoja digital también es un
+    documento, y con un umbral de «media página» su texto quedaba afuera de la búsqueda
+    y de la detección. Se mira además cada imagen grande por separado: si casi no tiene
+    texto nativo encima, lo que dice está en la imagen y hay que leerlo. Los escudos y
+    las firmas quedan debajo del tamaño mínimo y no mandan la hoja al OCR.
+
+    Las dos cosas se calculan en el marco SIN girar de la página, que es en el que
+    PyMuPDF devuelve tanto las imágenes como las palabras.
+    """
+    hoja = pag.rect * pag.derotation_matrix
+    area = hoja.width * hoja.height
+    if not area:
+        return 0.0, False
+    tapado, por_leer = 0.0, False
+    for info in pag.get_image_info():
+        r = pymupdf.Rect(info["bbox"]) & hoja
+        if r.is_empty:
+            continue
+        tapado += r.width * r.height
+        if r.width * r.height >= config.IMAGEN_MINIMA_OCR * area:
+            encima = sum(1 for p in palabras_sin_girar
+                         if r.contains(pymupdf.Point((p.x0 + p.x1) / 2, (p.y0 + p.y1) / 2)))
+            if encima < config.PALABRAS_QUE_EXPLICAN_UNA_IMAGEN:
+                por_leer = True
+    cobertura = min(1.0, tapado / area)
+    return cobertura, por_leer or cobertura >= config.COBERTURA_IMAGEN_OCR
+
+
 def leer_nativo(ruta_pdf: Path, numero_pdf: int) -> Lectura:
     t0 = time.perf_counter()
-    palabras = []
+    sin_girar = []
     with pymupdf.open(ruta_pdf) as doc:
         pag = doc[numero_pdf - 1]
         for x0, y0, x1, y1, w, *_ in pag.get_text("words"):
             if w.strip():
-                palabras.append(Palabra(w, x0, y0, x1, y1, 1.0))
+                sin_girar.append(Palabra(w, x0, y0, x1, y1, 1.0))
+        cobertura, por_leer = _imagenes(pag, sin_girar)
+        # PyMuPDF devuelve las palabras en el marco de la página SIN girar, y la hoja
+        # (`rect`) y la imagen del visor en el marco girado. En una página con /Rotate
+        # eso dejaba el resaltado en otro lado de la foja y la foliatura buscando el
+        # número en el margen equivocado. Todo se pasa al marco girado, que es el que se
+        # ve y el mismo en que devuelve el OCR.
+        giro = pag.rotation_matrix
+        palabras = []
+        for p in sin_girar:
+            r = pymupdf.Rect(p.x0, p.y0, p.x1, p.y1) * giro
+            palabras.append(Palabra(p.texto, r.x0, r.y0, r.x1, r.y1, 1.0))
         ancho, alto = pag.rect.width, pag.rect.height
     return Lectura("nativo", palabras, 1.0, ancho, alto, 0,
-                   int((time.perf_counter() - t0) * 1000))
+                   int((time.perf_counter() - t0) * 1000), cobertura, por_leer)
+
+
+def _solapa(p: Palabra, otras: list[Palabra], margen: float = 2.0) -> bool:
+    """¿El centro de esta palabra cae adentro de alguna de las otras?"""
+    cx, cy = (p.x0 + p.x1) / 2, (p.y0 + p.y1) / 2
+    return any(o.x0 - margen <= cx <= o.x1 + margen and o.y0 - margen <= cy <= o.y1 + margen
+               for o in otras)
+
+
+def _tinta_sin_leer(im: Image.Image, palabras: list[Palabra], dpi: int) -> float:
+    """
+    Qué fracción de la hoja es tinta que ninguna palabra leída explica.
+
+    Se tapan con blanco los recuadros de todo lo que se leyó —nativo y OCR— y se cuenta
+    lo oscuro que queda. Un cuerpo escaneado que el OCR no pudo leer deja mucha tinta
+    afuera; un membrete o un fondo con la capa de texto completa encima, poca.
+    """
+    escala = dpi / config.PT_POR_PULGADA
+    gris = im.convert("L")
+    dibujo = ImageDraw.Draw(gris)
+    for p in palabras:
+        dibujo.rectangle((p.x0 * escala - 3, p.y0 * escala - 3,
+                          p.x1 * escala + 3, p.y1 * escala + 3), fill=255)
+    h = gris.histogram()
+    return sum(h[:128]) / (sum(h) or 1)
+
+
+def _combinar(nativa: Lectura, ocr: Lectura, im: Image.Image | None = None,
+              dpi: int = 0) -> Lectura:
+    """
+    Junta lo que traía la capa de texto con lo que leyó el OCR en la imagen.
+
+    Lo nativo se queda tal cual —es exacto— y del OCR se suma sólo lo que no está encima
+    de una palabra nativa: la página se rasteriza entera, así que el OCR también lee el
+    sello que ya venía como texto, y contarlo dos veces ensucia la búsqueda y la
+    detección.
+
+    La confianza es la de lo que HUBO que leer con OCR, no la de la capa nativa: una
+    página con el cuerpo escaneado y un pie digital no se leyó al cien por ciento, y un
+    1,0 en la pantalla escondería justamente la parte dudosa.
+
+    Que el OCR no encuentre nada fuera de lo nativo NO prueba que la imagen sea fondo.
+    El caso que lo mostró: un escaneo ilegible con el sello digital encima, donde el OCR
+    lee sólo el sello; tomarlo por fondo devolvía la lectura nativa con confianza 1,0 y
+    el cuerpo quedaba afuera sin aviso. Se mira entonces la tinta que queda fuera de todo
+    lo leído: si hay, la página vuelve con confianza cero y aparece entre las mal
+    leídas —también una foto sin epígrafe, que el sistema de verdad no leyó—; si no hay,
+    la imagen era fondo y vale lo nativo. Lo mismo si el OCR no devolvió ni una palabra,
+    ni siquiera el sello, que también está dibujado en la imagen.
+    """
+    extra = [p for p in ocr.palabras if not _solapa(p, nativa.palabras)]
+    palabras = (sorted(nativa.palabras + extra, key=lambda p: (round(p.y0, 1), p.x0))
+                if extra else nativa.palabras)
+    # El control de tinta corre SIEMPRE, no sólo cuando el OCR no sumó nada: con que
+    # leyera un número de foja suelto, la página salía con la confianza de ese número y
+    # el cuerpo ilegible quedaba afuera igual, sin figurar entre las mal leídas.
+    queda_tinta = (not ocr.palabras or (
+        im is not None
+        and _tinta_sin_leer(im, nativa.palabras + ocr.palabras, dpi) > config.TINTA_SIN_LEER))
+    if queda_tinta:
+        return Lectura("mixta", palabras, 0.0, nativa.ancho_pt, nativa.alto_pt, 0,
+                       nativa.ms + ocr.ms, nativa.cobertura_imagen)
+    if not extra:
+        return nativa
+    confianza = sum(p.conf for p in extra) / len(extra)
+    return Lectura("mixta", palabras, confianza, nativa.ancho_pt, nativa.alto_pt, 0,
+                   nativa.ms + ocr.ms, nativa.cobertura_imagen)
 
 
 # ──────────────────────────────────────────────────────────────── ruta: OCR ──
@@ -184,19 +301,33 @@ def _enderezar_si_mejora(im: Image.Image, dpi: int, primera: Lectura) -> tuple[i
 
 # ──────────────────────────────────────────────────────────── orquestación ──
 def leer_pagina(ruta_pdf: Path, numero_pdf: int, tiene_texto_nativo: bool) -> Lectura:
-    """Todo el trabajo de UNA página. No toca la base: se puede correr en paralelo."""
+    """
+    Todo el trabajo de UNA página. No toca la base: se puede correr en paralelo.
+
+    La capa de texto sola no alcanza para decidir que la página está leída. El caso que
+    lo mostró es de todos los días: un escaneo con el sello de firma digital encima. El
+    sello trae texto nativo de sobra, la página pasaba por digital, y el cuerpo —que es
+    una imagen— nunca llegaba al OCR: quedaba indexado el sello, se perdía el contenido
+    para la búsqueda y la detección, y la pantalla decía confianza 1,0. Ahora, si la hoja
+    está tapada por imágenes, se lee también la imagen y se junta.
+    """
+    nativa = None
     if tiene_texto_nativo:
-        lec = leer_nativo(ruta_pdf, numero_pdf)
-        if lec.palabras:
-            return lec
-        # La capa de texto prometía y no cumplió. Pasa con PDF donde el texto es un
-        # sello o un pie de página sobre una imagen. Se cae a OCR en vez de dar por
-        # leída una página de la que no se sacó una palabra.
+        nativa = leer_nativo(ruta_pdf, numero_pdf)
+        if nativa.palabras and not nativa.imagen_por_leer:
+            return nativa
+        # O la capa de texto prometía y no trajo nada, o trae algo pero la hoja es una
+        # imagen. En los dos casos hay que leer la imagen.
 
     im = _pixmap(ruta_pdf, numero_pdf, config.DPI_OCR)
     lec = leer_ocr(im, config.DPI_OCR)
     if lec.confianza < config.CONFIANZA_SOSPECHA_GIRO and tiene_tinta(im):
         _, lec, _ = _enderezar_si_mejora(im, config.DPI_OCR, lec)
+    if nativa is not None and nativa.palabras and not lec.rotacion:
+        # Con la página girada, las coordenadas del OCR están en otro marco que las de la
+        # capa nativa, y juntarlas pondría el sello en cualquier lado. Ahí vale el OCR
+        # solo, que igual lee el sello porque la imagen se rasteriza entera.
+        return _combinar(nativa, lec, im, config.DPI_OCR)
     return lec
 
 

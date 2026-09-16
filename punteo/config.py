@@ -130,6 +130,19 @@ OCR_CONFIG = "--oem 1 --psm 6"
 # Una capa de texto de cuatro caracteres sueltos no es una capa de texto: es el pie de
 # página que el escáner metió encima de una imagen.
 MINIMO_TEXTO_NATIVO = 40
+# Qué parte de la hoja tiene que estar tapada por imágenes para leerla también con OCR
+# aunque traiga texto nativo. Un escaneo con sello digital anda cerca del cien por
+# ciento; un PDF digital con el escudo del membrete, muy por debajo de la mitad.
+COBERTURA_IMAGEN_OCR = 0.5
+# Una imagen de al menos esta fracción de la hoja se mira por separado: si casi no tiene
+# texto nativo encima, lo que dice está en la imagen. Por debajo quedan los escudos del
+# membrete y las firmas escaneadas, que no justifican mandar la hoja al OCR.
+IMAGEN_MINIMA_OCR = 0.15
+PALABRAS_QUE_EXPLICAN_UNA_IMAGEN = 5
+# Fracción de la hoja que puede ser tinta sin ninguna palabra leída encima antes de dar
+# la página por mal leída. Un renglón de cuerpo escaneado suelta bastante más; un
+# membrete o una línea de firma, bastante menos.
+TINTA_SIN_LEER = 0.02
 
 # Debajo de esta confianza la página se considera mal leída. Se muestra, se cuenta y se
 # puede filtrar: la persona tiene que saber qué parte del legajo el sistema no leyó.

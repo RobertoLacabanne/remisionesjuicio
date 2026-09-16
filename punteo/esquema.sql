@@ -103,7 +103,7 @@ CREATE TABLE IF NOT EXISTS pagina (
   -- paga a propósito: la detección de piezas y la pantalla lo piden entero cientos de
   -- veces, y rearmarlo con un JOIN y un ORDER BY cada vez cuesta más que el disco.
   texto          TEXT,
-  ruta_lectura   TEXT,                 -- nativo | ocr
+  ruta_lectura   TEXT,                 -- nativo | ocr | mixta (escaneo con texto encima)
   confianza      REAL,
   leida_en       TEXT,
   UNIQUE (documento_id, numero_pdf),
