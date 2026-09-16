@@ -14,6 +14,7 @@ legajo. Se escribe una sola vez y no se toca nunca más:
 from __future__ import annotations
 
 import hashlib
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,12 +25,40 @@ class ArchivoInvalido(ValueError):
     pass
 
 
+class OriginalAlterado(RuntimeError):
+    """
+    Ya hay un archivo guardado con el hash de este documento y su contenido es otro.
+
+    No se reemplaza: el original no se reescribe nunca, ni siquiera para «arreglarlo».
+    Lo que corresponde es que una persona mire qué pasó con ese archivo.
+    """
+
+
+class OriginalSinProteger(RuntimeError):
+    """
+    El original quedó escrito pero el sistema de archivos no lo dejó de sólo lectura.
+
+    La invariante es que el original se guarda en 0444, así que esto corta la carga. Hay
+    carpetas que ignoran el permiso —algunas montadas en un contenedor, algunos discos de
+    red—, y para esas existe `PUNTEO_ORIGINALES_SIN_PROTECCION=aceptar`: una decisión
+    explícita de quien instala, como `PUNTEO_ACCESO=abierto`, nunca un efecto
+    secundario. Con esa variable la carga sigue, pero queda anotada y se avisa.
+    """
+
+
+def acepta_sin_proteccion() -> bool:
+    return os.environ.get("PUNTEO_ORIGINALES_SIN_PROTECCION", "").strip().lower() == "aceptar"
+
+
 @dataclass
 class Guardado:
     sha256: str
     ruta: Path
     bytes: int
     ya_estaba: bool
+    # Si el archivo quedó de sólo lectura. Sólo puede ser False cuando quien instaló
+    # aceptó explícitamente trabajar así (ver `OriginalSinProteger`).
+    protegido: bool = True
 
 
 def sha256_de(datos: bytes) -> str:
@@ -55,13 +84,43 @@ def validar(datos: bytes, nombre: str) -> None:
         raise ArchivoInvalido(f"«{nombre}» no es un PDF: no empieza con %PDF")
 
 
+def _proteger(ruta: Path) -> bool:
+    """
+    Deja el archivo de sólo lectura y comprueba que haya quedado así.
+
+    La primera versión hacía el `chmod` y, si fallaba, seguía como si nada: el sistema
+    registraba como protegido un original que cualquiera podía sobrescribir. Ahora se
+    mira el resultado, y si no quedó protegido se corta, salvo aceptación explícita.
+    """
+    try:
+        ruta.chmod(0o444)
+        protegido = not (ruta.stat().st_mode & 0o222)
+    except OSError:
+        protegido = False
+    if not protegido and not acepta_sin_proteccion():
+        raise OriginalSinProteger(
+            f"el sistema de archivos no dejó {ruta.name} en sólo lectura. Si esta carpeta "
+            f"no puede respetar ese permiso y se acepta trabajar así, hay que declararlo "
+            f"con PUNTEO_ORIGINALES_SIN_PROTECCION=aceptar")
+    return protegido
+
+
 def guardar(datos: bytes, nombre: str) -> Guardado:
     """Escribe el original en la carpeta del caso activo y lo deja de sólo lectura."""
     validar(datos, nombre)
     sha = sha256_de(datos)
     destino = Path(config.ORIGINALES) / sha[:2] / f"{sha}.pdf"
     if destino.exists():
-        return Guardado(sha, destino, len(datos), True)
+        # Que exista un archivo con ese nombre no prueba que sea este documento. Antes se
+        # daba por bueno sin mirarlo, y un archivo alterado —a mano, por el disco, por
+        # una copia a medias— quedaba registrado con un hash que no es el suyo.
+        actual = sha256_de_archivo(destino)
+        if actual != sha:
+            raise OriginalAlterado(
+                f"ya hay un original guardado con el hash de «{nombre}» y su contenido "
+                f"no coincide (hoy hashea {actual[:12]}…). No se reemplaza: hay que "
+                f"revisar qué le pasó a {destino.name}")
+        return Guardado(sha, destino, len(datos), True, _proteger(destino))
 
     destino.parent.mkdir(parents=True, exist_ok=True)
     # Se escribe a un parcial y se renombra. El renombrado es atómico en el mismo
@@ -71,11 +130,7 @@ def guardar(datos: bytes, nombre: str) -> Guardado:
     parcial = destino.with_suffix(".parcial")
     parcial.write_bytes(datos)
     parcial.rename(destino)
-    try:
-        destino.chmod(0o444)
-    except OSError:
-        pass
-    return Guardado(sha, destino, len(datos), False)
+    return Guardado(sha, destino, len(datos), False, _proteger(destino))
 
 
 def ruta_de(sha: str) -> Path:
@@ -95,4 +150,6 @@ def verificar(sha: str) -> tuple[bool, str]:
     actual = sha256_de_archivo(ruta)
     if actual != sha:
         return False, f"el contenido cambió: ahora hashea {actual[:12]}…"
+    if ruta.stat().st_mode & 0o222:
+        return True, "sin cambios, pero el archivo NO está protegido contra escritura"
     return True, "sin cambios"

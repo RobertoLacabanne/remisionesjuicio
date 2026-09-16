@@ -301,8 +301,9 @@ async function subir(archivos) {
                      'X-Nombre-Archivo': encodeURIComponent(f.name) },
       });
       guardado();
-      avisar(r.duplicado ? `«${f.name}» ya estaba cargado (mismo contenido).`
-                         : `«${f.name}»: ${r.paginas} páginas.`);
+      if (r.advertencia) avisar(`«${f.name}»: ${r.advertencia}.`, true);
+      else avisar(r.duplicado ? `«${f.name}» ya estaba cargado (mismo contenido).`
+                              : `«${f.name}»: ${r.paginas} páginas.`);
     } catch (e) { fallo(e); }
   }
   await cargarLegajo();

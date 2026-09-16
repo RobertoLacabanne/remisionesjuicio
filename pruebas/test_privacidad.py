@@ -132,20 +132,96 @@ class SinTelemetria(unittest.TestCase):
                             f"fetch a {destino[1]}")
 
 
-class OriginalInmutable(unittest.TestCase):
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from comun import CasoVacio, pdf_de  # noqa: E402
 
-    def test_el_almacen_no_reescribe(self):
-        """
-        El original se escribe una vez y queda en 0444. Es la restricción de la que
-        depende poder decir que el documento del legajo es el que entró.
-        """
-        import inspect
 
+class OriginalInmutable(CasoVacio):
+    """
+    El original se escribe una vez, queda en 0444 y no se reescribe. Es la restricción
+    de la que depende poder decir que el documento del legajo es el que entró.
+
+    La versión anterior de esta prueba buscaba cadenas en el código fuente: pasaba
+    aunque el `chmod` fallara en silencio o aunque un archivo alterado se aceptara con
+    el nombre de otro hash. Ahora se prueba lo que pasa.
+    """
+
+    def _cargar(self, datos: bytes, nombre: str = "legajo.pdf"):
+        from punteo import ingesta
+        return ingesta.agregar(self.cx, datos, nombre)
+
+    def _ruta(self, documento_id: int) -> Path:
+        return Path(self.cx.execute("SELECT ruta FROM documento WHERE id=?",
+                                    (documento_id,)).fetchone()["ruta"])
+
+    def test_queda_de_solo_lectura_y_no_se_reescribe(self):
+        datos = pdf_de([["ACTA DE SECUESTRO"]])
+        r = self._cargar(datos)
+        ruta = self._ruta(r.documento_id)
+        self.assertFalse(ruta.stat().st_mode & 0o222, "el original quedó escribible")
+        antes = ruta.stat().st_mtime_ns
+
+        otra = self._cargar(datos, "copia.pdf")
+        self.assertTrue(otra.duplicado)
+        self.assertIsNone(otra.advertencia)
+        self.assertEqual(ruta.stat().st_mtime_ns, antes, "se volvió a escribir el original")
+
+    def test_un_archivo_alterado_con_el_nombre_del_hash_no_se_acepta(self):
+        """
+        Que exista un archivo con el nombre del hash no prueba que sea ese documento. Se
+        aceptaba sin mirarlo, y el caso quedaba registrando un hash que no es el suyo.
+        """
         from punteo import almacen
-        codigo = inspect.getsource(almacen)
-        self.assertIn("0o444", codigo)
-        # No puede haber una ruta de escritura sobre un original ya guardado.
-        self.assertIn("if destino.exists():", codigo)
+        datos = pdf_de([["ACTA DE SECUESTRO"]])
+        ruta = self._ruta(self._cargar(datos).documento_id)
+        ruta.chmod(0o644)
+        ruta.write_bytes(datos + b"\n% alterado a mano\n")
+        ruta.chmod(0o444)
+
+        with self.assertRaises(almacen.OriginalAlterado):
+            almacen.guardar(datos, "otra-vez.pdf")
+        r = self._cargar(datos, "otra-vez.pdf")
+        self.assertIsNotNone(r.error)
+        self.assertEqual(self.cx.execute(
+            "SELECT COUNT(*) FROM excepcion WHERE clase='original_alterado'").fetchone()[0], 1)
+        # Y no se «arregló» sobrescribiendo: el archivo sigue como quedó, para mirarlo.
+        self.assertTrue(ruta.read_bytes().endswith(b"% alterado a mano\n"))
+        ok, _ = almacen.verificar(almacen.sha256_de(datos))
+        self.assertFalse(ok)
+
+    def test_si_no_se_puede_proteger_la_carga_se_corta(self):
+        """
+        La invariante es 0444. Un `chmod` que falla ya no se traga: la carga no sigue y
+        queda anotado por qué.
+        """
+        import os
+        from unittest import mock
+        os.environ.pop("PUNTEO_ORIGINALES_SIN_PROTECCION", None)
+        with mock.patch("pathlib.Path.chmod", side_effect=OSError("permiso ignorado")):
+            r = self._cargar(pdf_de([["DECLARACION TESTIMONIAL"]]))
+        self.assertIsNotNone(r.error)
+        self.assertIn("PUNTEO_ORIGINALES_SIN_PROTECCION", r.error)
+        self.assertEqual(self.cx.execute("SELECT COUNT(*) FROM documento").fetchone()[0], 0)
+        self.assertEqual(self.cx.execute(
+            "SELECT COUNT(*) FROM excepcion WHERE clase='original_sin_proteger'"
+        ).fetchone()[0], 1)
+
+    def test_aceptarlo_a_proposito_deja_cargar_pero_avisa(self):
+        """
+        Para las carpetas que no pueden respetar el permiso existe una decisión
+        explícita. Con ella la carga sigue, pero no en silencio.
+        """
+        import os
+        from unittest import mock
+        os.environ["PUNTEO_ORIGINALES_SIN_PROTECCION"] = "aceptar"
+        self.addCleanup(os.environ.pop, "PUNTEO_ORIGINALES_SIN_PROTECCION", None)
+        with mock.patch("pathlib.Path.chmod", side_effect=OSError("permiso ignorado")):
+            r = self._cargar(pdf_de([["DECLARACION TESTIMONIAL"]]))
+        self.assertIsNone(r.error)
+        self.assertIsNotNone(r.advertencia)
+        self.assertEqual(self.cx.execute(
+            "SELECT COUNT(*) FROM excepcion WHERE clase='original_sin_proteger'"
+        ).fetchone()[0], 1)
 
 
 if __name__ == "__main__":

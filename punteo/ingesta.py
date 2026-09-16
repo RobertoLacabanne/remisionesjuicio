@@ -17,7 +17,10 @@ from pathlib import Path
 import pymupdf
 
 from . import almacen, config, db
-from .almacen import ArchivoInvalido
+from .almacen import ArchivoInvalido, OriginalAlterado, OriginalSinProteger
+
+SIN_PROTEGER = ("el original quedó guardado pero el sistema de archivos NO lo dejó de "
+                "sólo lectura: cualquiera con acceso a la carpeta puede modificarlo")
 
 
 @dataclass
@@ -27,11 +30,12 @@ class ResultadoIngesta:
     paginas: int
     duplicado: bool = False
     error: str | None = None
+    advertencia: str | None = None
 
     def como_dict(self) -> dict:
         return {"documento_id": self.documento_id, "nombre": self.nombre,
                 "paginas": self.paginas, "duplicado": self.duplicado,
-                "error": self.error}
+                "error": self.error, "advertencia": self.advertencia}
 
 
 def _metadatos(ruta: Path) -> tuple[int, list[tuple[float, float, bool]]]:
@@ -54,6 +58,21 @@ def agregar(cx: sqlite3.Connection, datos: bytes, nombre: str) -> ResultadoInges
         db.anotar_excepcion(cx, "pdf_invalido", f"{nombre}: {e}")
         cx.commit()
         return ResultadoIngesta(None, nombre, 0, error=str(e))
+    except OriginalAlterado as e:
+        db.anotar_excepcion(cx, "original_alterado", str(e))
+        cx.commit()
+        return ResultadoIngesta(None, nombre, 0, error=str(e))
+    except OriginalSinProteger as e:
+        db.anotar_excepcion(cx, "original_sin_proteger", str(e))
+        cx.commit()
+        return ResultadoIngesta(None, nombre, 0, error=str(e))
+
+    # Si llegó hasta acá sin protegerse es porque quien instaló lo aceptó a propósito.
+    # Igual no pasa callado: queda en las excepciones del caso y la pantalla lo dice.
+    advertencia = None
+    if not g.protegido:
+        advertencia = SIN_PROTEGER
+        db.anotar_excepcion(cx, "original_sin_proteger", f"{nombre}: {g.ruta.name}")
 
     ya = cx.execute("SELECT id, paginas FROM documento WHERE sha256=?", (g.sha256,)).fetchone()
     if ya:
@@ -63,7 +82,8 @@ def agregar(cx: sqlite3.Connection, datos: bytes, nombre: str) -> ResultadoInges
         cx.execute("""INSERT OR IGNORE INTO documento_duplicado (sha256, nombre, visto_en)
                       VALUES (?,?,?)""", (g.sha256, nombre, db.ahora()))
         cx.commit()
-        return ResultadoIngesta(ya["id"], nombre, ya["paginas"], duplicado=True)
+        return ResultadoIngesta(ya["id"], nombre, ya["paginas"], duplicado=True,
+                                advertencia=advertencia)
 
     try:
         n_pag, paginas = _metadatos(g.ruta)
@@ -94,7 +114,7 @@ def agregar(cx: sqlite3.Connection, datos: bytes, nombre: str) -> ResultadoInges
         [(doc_id, i, offset + i, ancho, alto, 1 if nativo else 0)
          for i, (ancho, alto, nativo) in enumerate(paginas, start=1)])
     cx.commit()
-    return ResultadoIngesta(doc_id, nombre, n_pag)
+    return ResultadoIngesta(doc_id, nombre, n_pag, advertencia=advertencia)
 
 
 def reordenar(cx: sqlite3.Connection, orden_ids: list[int]) -> None:
