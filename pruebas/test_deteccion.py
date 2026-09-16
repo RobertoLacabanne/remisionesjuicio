@@ -172,6 +172,58 @@ class ElContadorDeHojas(CasoVacio):
         self.assertEqual(continuidad("SE DETALLA A CONTINUACION"), (False, None))
 
 
+class ElRuidoDelEscaneoNoEsElEncabezado(CasoVacio):
+    """
+    En un escaneo de verdad, arriba de todo no está el título.
+
+    Está el borde negro de la hoja, el sello redondo de folio, una firma al margen y
+    las marcas del abrochado, y de todo eso el OCR saca renglones como «A! ES GN» o
+    «| /». Mirar las primeras seis líneas tal como vienen es gastar el encabezado en
+    basura y no llegar nunca al título, que está dos renglones más abajo.
+
+    El caso que lo hizo evidente: un legajo con siete actas de declaración testimonial,
+    cada una con «ACTA DE DECLARACIÓN TESTIMONIAL» centrado y en negrita. El detector no
+    reconoció ninguna, y las siete quedaron escondidas adentro de una sola pieza de
+    treinta y ocho páginas.
+    """
+
+    def _piezas(self):
+        from punteo.evidencia import deteccion
+        deteccion.detectar(self.cx)
+        return self.evidencias()
+
+    def test_el_titulo_se_reconoce_debajo_del_ruido(self):
+        ruido = ["A! ES GN", "| /", "| EL E .)", "2, SÍ", "* ."]
+        self.cargar([ruido + ["Dirección General de Administración",
+                              "ACTA DE DECLARACIÓN TESTIMONIAL",
+                              "En la ciudad de Paraná, comparece el testigo citado."]])
+        piezas = self._piezas()
+        self.assertEqual(len(piezas), 1)
+        self.assertEqual(piezas[0]["tipo"], "declaracion_testimonial",
+                         "el título quedó tapado por el ruido del margen")
+
+    def test_siete_actas_seguidas_son_siete_piezas(self):
+        """Lo que estaba en juego: cada acta es un testigo distinto."""
+        ruido = ["y ,", "| (0)", "S >", "A! l"]
+        paginas = []
+        for n in range(7):
+            paginas.append(ruido + ["ACTA DE DECLARACIÓN TESTIMONIAL",
+                                    f"Comparece el testigo número {n + 1}."])
+            paginas.append(["continúa al dorso", f"Sigue la declaración {n + 1}."])
+        self.cargar(paginas)
+
+        actas = [e for e in self._piezas() if e["tipo"] == "declaracion_testimonial"]
+        self.assertEqual(len(actas), 7)
+
+    def test_una_linea_de_basura_no_se_usa_como_descripcion(self):
+        """Sin filtro, la pieza sin título salía descripta «E»."""
+        self.cargar([["E", "| /", "* .",
+                      "Constancia de recepción de documentación en la unidad fiscal."]])
+        piezas = self._piezas()
+        self.assertEqual(len(piezas), 1)
+        self.assertNotEqual(piezas[0]["descripcion"].strip(), "E")
+
+
 class Catalogo(unittest.TestCase):
 
     def setUp(self):
@@ -213,18 +265,45 @@ class Catalogo(unittest.TestCase):
 
 
 class Fechas(unittest.TestCase):
-    """Nunca se infiere una fecha. Si no está completa, no está."""
+    """
+    La fecha que sale al escrito es la del documento, y un documento jurídico está lleno
+    de fechas que son de otros documentos.
+
+    El caso que fijó estas reglas: siete actas de declaración testimonial labradas entre
+    el 27 de agosto y el 4 de septiembre salían las siete con fecha 7 de agosto, porque
+    las siete citan en su primer párrafo una resolución «fechada 07 de agosto de 2025» y
+    el detector tomaba la primera fecha que encontraba.
+    """
 
     def setUp(self):
         import sys
         from pathlib import Path
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-    def test_las_que_se_pueden_afirmar(self):
+    def test_la_formula_de_otorgamiento(self):
         from punteo.evidencia.deteccion import detectar_fecha
-        self.assertEqual(detectar_fecha("labrada el 12/03/2024 en Paraná"), "2024-03-12")
-        self.assertEqual(detectar_fecha("a los 5 de agosto de 2023"), "2023-08-05")
-        self.assertEqual(detectar_fecha("el 1 de setiembre de 2022"), "2022-09-01")
+        self.assertEqual(
+            detectar_fecha("En la ciudad de Paraná, departamento Paraná de la Provincia "
+                           "de Entre Ríos, a los 28 días del mes de agosto del año 2025, "
+                           "siendo las 09:00 horas"), "2025-08-28")
+        # Con la basura que el OCR mete entre los tokens de un escaneo torcido.
+        self.assertEqual(detectar_fecha("a los 01 | días del mes de septiembre del 2025"),
+                         "2025-09-01")
+
+    def test_la_formula_de_encabezamiento(self):
+        from punteo.evidencia.deteccion import detectar_fecha
+        self.assertEqual(detectar_fecha("Paraná, 14 de julio del 2025"), "2025-07-14")
+        self.assertEqual(detectar_fecha("Concordia, 1 de setiembre de 2022"), "2022-09-01")
+
+    def test_la_fecha_de_otro_documento_no_se_afirma(self):
+        from punteo.evidencia.deteccion import detectar_fecha
+        # Lo que pasaba en las siete actas: la fecha de la resolución que las ordenó.
+        self.assertIsNone(detectar_fecha(
+            "en el marco de las actuaciones ordenadas mediante Resolución "
+            "Nº 111/26, fechada 07 de agosto de 2023, por la autoridad de aplicación"))
+        # Una fecha suelta no dice de qué documento es, aunque sea la única del texto.
+        self.assertIsNone(detectar_fecha("labrada el 12/03/2024"))
+        self.assertIsNone(detectar_fecha("capturas de pantalla de fechas aleatorias 06/06/2025"))
 
     def test_las_que_no(self):
         from punteo.evidencia.deteccion import detectar_fecha
@@ -232,7 +311,7 @@ class Fechas(unittest.TestCase):
         self.assertIsNone(detectar_fecha("a los doce días del mes de marzo"))
         self.assertIsNone(detectar_fecha("sin fecha alguna"))
         self.assertIsNone(detectar_fecha("expediente 4412/99012"))
-        self.assertIsNone(detectar_fecha("el 45/13/2024"))
+        self.assertIsNone(detectar_fecha("Paraná, 45 de marzo de 2024"))
 
 
 if __name__ == "__main__":

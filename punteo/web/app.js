@@ -253,7 +253,8 @@ async function cargarLegajo() {
       <div class="contadores-tira">
         ${[['paginas', 'páginas', ''], ['confirmadas', 'confirmadas', 'incluidas'],
            ['detectadas', 'detectadas', 'pendientes'], ['manuales', 'a mano', ''],
-           ['desconocidas', 'sin foja', 'avisa']]
+           ['desconocidas', 'sin foja', 'avisa'],
+           ['sellos_sin_leer', 'sello sin leer', 'avisa']]
           .map(([k, r, cl]) => `<div class="cuenta ${cl}"><b>${fol[k] ?? 0}</b><span>${r}</span></div>`).join('')}
       </div>`;
     $('#tramos-foliatura').innerHTML = (fol.tramos || []).map(t => `
@@ -265,6 +266,22 @@ async function cargarLegajo() {
         <span class="confianza ${t.confianza >= .75 ? 'alta' : t.confianza >= .55 ? 'media' : 'baja'}">${t.confianza}</span>
         <button class="mini" data-confirmar="${t.desde_global}:${t.hasta_global}">Confirmar tramo</button>
       </div>`).join('') || '<p class="vacio">No se detectó ningún tramo de foliatura.</p>';
+
+    // Las series que se descartaron, con el motivo. Sin esto, un legajo lleno de
+    // informes que numeran sus propias hojas muestra «no se detectó foliatura» y parece
+    // que el sistema no miró el margen. Miró: encontró números y probó que no son fojas.
+    const caidas = fol.tramos_descartados || [];
+    $('#tramos-descartados').innerHTML = !caidas.length ? '' : `
+      <p class="ayuda descarte">Series de números que se encontraron en el margen y
+        <b>no se usaron como foliatura</b>. Casi siempre son la paginación interna de un
+        informe, que numera sus propias hojas desde 1: dos de esas series se contradicen
+        entre sí, y por eso se sabe que no son las fojas del legajo.</p>
+      ${caidas.map(t => `
+        <div class="tramo descartado">
+          <span class="mono">págs. ${t.desde_global}–${t.hasta_global}</span>
+          <span class="mono tenue">daría fs. ${t.desde_global + t.desplazamiento}–${t.hasta_global + t.desplazamiento}</span>
+          <span class="tenue">${esc(t.zona)} · ${esc(t.descartado)}</span>
+        </div>`).join('')}`;
     $$('[data-confirmar]').forEach(b => b.onclick = async () => {
       const [desde, hasta] = b.dataset.confirmar.split(':').map(Number);
       await escribir(() => api(`/api/caso/${E.caso.slug}/foliatura`,
@@ -488,9 +505,14 @@ async function irAPagina(numero, resalte) {
   // tramo de cuarenta fojas no convierte en leído lo que nadie leyó, y es justo donde
   // una hoja intercalada corre la numeración.
   const interpolada = pag && pag.foja_lectura === 'interpolada' ? ' · interpolada' : '';
+  // El sello de folio con el número a mano: la hoja SÍ está foliada, sólo que el OCR no
+  // lee manuscrita. Decirlo acá es lo que convierte «sin foja» —que invita a seguir de
+  // largo— en «copiá el número del sello», que es lo que hay que hacer.
+  const aMano = pag && pag.foja_lectura === 'sello_ilegible'
+    ? ' · hay sello de folio: copiá el número' : '';
   sello.textContent = ({ desconocida: 'sin foja', detectada: 'detectada',
                          confirmada: 'confirmada', manual: 'a mano' }[origen] || origen)
-                      + interpolada;
+                      + interpolada + aMano;
   pintarResalte(resalte);
   pintarTira();
 }

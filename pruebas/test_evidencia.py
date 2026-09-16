@@ -238,6 +238,47 @@ class Duplicados(CasoDePrueba):
         restantes = [d["id"] for d in duplicados.listar(self.cx)]
         self.assertNotIn(lista[0]["id"], restantes)
 
+    def test_dos_fechas_ciertas_y_distintas_no_son_la_misma_pieza(self):
+        """
+        Siete actas del mismo sumario comparten el membrete, la fórmula de juramento y
+        el artículo 275 del Código Penal transcripto entero. Se parecen al noventa por
+        ciento y son siete testigos distintos: el primer legajo real proponía veintiún
+        duplicados y ninguno lo era.
+        """
+        from punteo.evidencia import duplicados, modelo
+        evs = self.evidencias()
+        a, b = evs[0], evs[1]
+        modelo.editar(self.cx, a["id"], {"descripcion": "Acta de declaración testimonial"})
+        modelo.editar(self.cx, b["id"], {"descripcion": "Acta de declaración testimonial"})
+
+        self.cx.execute("UPDATE evidencia SET fecha_documento=NULL WHERE id IN (?,?)",
+                        (a["id"], b["id"]))
+        self.cx.commit()
+        duplicados.detectar(self.cx)
+        pares = {(d["a_id"], d["b_id"]) for d in duplicados.listar(self.cx)}
+        self.assertIn((a["id"], b["id"]), pares, "sin fechas, el par se propone")
+
+        self.cx.execute("UPDATE evidencia SET fecha_documento='2025-09-01' WHERE id=?", (a["id"],))
+        self.cx.execute("UPDATE evidencia SET fecha_documento='2025-09-03' WHERE id=?", (b["id"],))
+        self.cx.commit()
+        duplicados.detectar(self.cx)
+        pares = {(d["a_id"], d["b_id"]) for d in duplicados.listar(self.cx)}
+        self.assertNotIn((a["id"], b["id"]), pares)
+
+    def test_la_misma_fecha_sigue_proponiendose(self):
+        """El duplicado verdadero: el mismo informe agregado dos veces, misma fecha."""
+        from punteo.evidencia import duplicados, modelo
+        evs = self.evidencias()
+        a, b = evs[0], evs[1]
+        modelo.editar(self.cx, a["id"], {"descripcion": "Informe pericial contable"})
+        modelo.editar(self.cx, b["id"], {"descripcion": "Informe pericial contable"})
+        self.cx.execute("UPDATE evidencia SET fecha_documento='2025-09-01' WHERE id IN (?,?)",
+                        (a["id"], b["id"]))
+        self.cx.commit()
+        duplicados.detectar(self.cx)
+        pares = {(d["a_id"], d["b_id"]) for d in duplicados.listar(self.cx)}
+        self.assertIn((a["id"], b["id"]), pares)
+
 
 class Testigos(CasoDePrueba):
 

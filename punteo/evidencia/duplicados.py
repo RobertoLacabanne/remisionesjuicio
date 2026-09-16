@@ -41,10 +41,28 @@ def _parecido(a: str | None, b: str | None) -> float:
     return len(fa & fb) / len(fa | fb)
 
 
+def _fechas_distintas(a: str | None, b: str | None) -> bool:
+    """
+    Dos documentos con fecha cierta y distinta no son el mismo documento.
+
+    Es un descarte duro y hace falta, porque el parecido de texto no alcanza contra un
+    formulario. Siete actas de declaración testimonial del mismo sumario comparten el
+    membrete, la fórmula de juramento y el artículo 275 del Código Penal transcripto
+    entero: se parecen al noventa por ciento y son siete testigos distintos. Sin esto,
+    el primer legajo real proponía veintiún duplicados y ninguno lo era, que es la forma de
+    que nadie vuelva a mirar las propuestas.
+
+    No toca el duplicado verdadero: el mismo informe agregado dos veces trae la misma
+    fecha en las dos copias. Y si una de las dos no tiene fecha, no hay contradicción y
+    el par se propone igual.
+    """
+    return bool(a) and bool(b) and a != b
+
+
 def detectar(cx: sqlite3.Connection) -> dict:
     """Recorre las piezas activas y propone los pares que se parecen."""
     filas = cx.execute("""SELECT id, tipo, descripcion, texto_origen, pagina_inicio,
-                                 pagina_fin
+                                 pagina_fin, fecha_documento
                             FROM v_evidencia WHERE activa = 1
                            ORDER BY pagina_inicio""").fetchall()
     cx.execute("DELETE FROM duplicado_posible WHERE estado='abierto'")
@@ -59,6 +77,8 @@ def detectar(cx: sqlite3.Connection) -> dict:
                     break                      # ordenadas: de acá en adelante, más lejos
             par = (min(a["id"], b["id"]), max(a["id"], b["id"]))
             if par in descartados:
+                continue
+            if _fechas_distintas(a["fecha_documento"], b["fecha_documento"]):
                 continue
 
             motivos, score = [], 0.0

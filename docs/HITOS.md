@@ -87,9 +87,9 @@ El recorrido del criterio de éxito funciona de punta a punta: crear caso, carga
 procesar, revisar con la foja al lado, corregir, asignar testigo, incluir y excluir,
 agregar a mano, ordenar, generar y exportar.
 
-135 pruebas. Sin `--lentas` corren 123 y se saltean las 11 que invocan Tesseract;
-con `--lentas` corren 134 —la que falta se saltea por condición, cuando el segundo PDF
-de prueba entra como copia exacta del primero—. Todas en verde.
+245 pruebas. Sin `--lentas` se saltean las 12 que invocan Tesseract; con `--lentas` se
+saltea una sola, por condición, cuando el segundo PDF de prueba entra como copia exacta
+del primero. Todas en verde por las dos rutas.
 
 ---
 
@@ -102,15 +102,43 @@ AppUFIL esté al lado en el disco.
 
 ---
 
+## Hito 11 — Primer legajo real · **hecho**
+
+Entró el primer legajo penal escaneado de verdad: 84 páginas sin capa de texto, la
+primera parte de un legajo de corrupción. Leído entero, 0 páginas fallidas, un minuto de
+OCR. La ingesta, el visor, la revisión, la carga en partes y la invariante de exclusión
+funcionaron sin una observación.
+
+Falló otra cosa, y cinco veces: el sistema **afirmaba a partir de señales compatibles con
+lo que buscaba en lugar de exigir señales que sólo pudieran significar eso**. Foliatura
+falsa con confianza 0,89 —era la paginación interna de dos informes—, hojas selladas a
+mano indistinguibles de hojas sin foliar, siete actas de declaración testimonial
+escondidas adentro de una sola pieza porque el encabezado se gastaba en el ruido del
+escaneo, las siete con la misma fecha y falsa —la de la resolución que citan—, y después
+veintiún duplicados propuestos y ninguno verdadero.
+
+Los cinco arreglados, cada uno con su prueba, buscando una contradicción dura o una marca
+de atribución en lugar de subir umbrales. Sobre ese legajo: de 14 fojas falsas a ninguna,
+de 6 piezas a 15 con las siete actas separadas y cada una con su fecha real, de 21
+propuestas de duplicado a ninguna.
+
+El detalle, con el método y lo que quedó sin resolver, en
+[`LEGAJO-REAL.md`](LEGAJO-REAL.md). Del legajo no queda nada en el repositorio.
+
+---
+
 ## Lo que sigue, por orden de valor
 
-1. **Medir con un legajo real grande.** Es lo que más puede cambiar decisiones tomadas.
-2. **Señales de corte que no dependan del título** —membrete, bloque de firma, página en
+1. **Medir con un legajo real GRANDE.** El primero fueron 84 páginas y despejó lo que
+   despejó; de mil páginas no dice nada.
+2. **Mejorar la descripción propuesta cuando el título no se reconoce**, que hoy sale como
+   un fragmento del cuerpo del documento.
+3. **Señales de corte que no dependan del título** —membrete, bloque de firma, página en
    blanco—: es el agujero por donde hoy se puede esconder una pieza sin título.
-3. **Clave de acceso**, adaptando el criterio de `acceso.py` de AppUFIL: no obligatoria
+4. **Clave de acceso**, adaptando el criterio de `acceso.py` de AppUFIL: no obligatoria
    en `127.0.0.1`, obligatoria al exponer en red.
-4. **Arrastre para reordenar**, conservando siempre la alternativa por botones.
-5. **Agrupación propuesta por organismo y membrete**, como sugerencia que el usuario
+5. **Arrastre para reordenar**, conservando siempre la alternativa por botones.
+6. **Agrupación propuesta por organismo y membrete**, como sugerencia que el usuario
    acepta, rechaza o corrige; nunca aplicada sola.
-6. **Exportación a DOCX**, que entra sin tocar el generador.
-7. **Coordinación entre pestañas** y guardado del texto a medio escribir.
+7. **Exportación a DOCX**, que entra sin tocar el generador.
+8. **Coordinación entre pestañas** y guardado del texto a medio escribir.

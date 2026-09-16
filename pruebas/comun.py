@@ -51,6 +51,29 @@ def pdf_de(paginas: list[list[str]]) -> bytes:
     return datos
 
 
+def _pdf_en_margen(paginas: list[tuple[str, str]], donde: tuple[float, float]) -> bytes:
+    """
+    Como `pdf_de`, más una marca en el margen: el número al pie, o el sello de folio.
+
+    La posición se pasa en puntos y no en fracciones porque lo que se está probando es
+    justamente el reparto en zonas de `foliatura._zona_de`, y una prueba que calculara la
+    posición con la misma fórmula que el código bajo prueba no probaría nada.
+    """
+    import pymupdf
+    doc = pymupdf.open()
+    doc.set_metadata({"keywords": "PUNTEO-LEGAJO-SINTETICO-DE-PRUEBA"})
+    for titulo, margen in paginas:
+        pag = doc.new_page(width=595, height=842)
+        pag.insert_text((56, 140), titulo, fontname="helv", fontsize=13)
+        pag.insert_textbox(pymupdf.Rect(56, 170, 539, 700),
+                           "Cuerpo del documento a los fines de la prueba. " * 12,
+                           fontname="tiro", fontsize=10.5)
+        pag.insert_text(donde, margen, fontname="helv", fontsize=11)
+    datos = doc.tobytes(garbage=4, deflate=True)
+    doc.close()
+    return datos
+
+
 class CasoVacio(unittest.TestCase):
     """
     Un caso sin nada adentro, para las pruebas que necesitan un legajo armado a medida.
@@ -77,6 +100,25 @@ class CasoVacio(unittest.TestCase):
         """Ingiere un PDF escrito acá mismo y lo lee. Sin Tesseract: capa nativa."""
         from punteo import ingesta, ocr
         ingesta.agregar(self.cx, pdf_de(paginas), nombre)
+        ocr.leer_caso(self.cx)
+
+    def cargar_con_pie(self, paginas: list[tuple[str, str]], nombre: str = "legajo.pdf"):
+        """
+        Cada página con su título y un número al pie, a la derecha.
+
+        Es la forma del documento que numera sus propias hojas —un informe, una pericia,
+        un expediente administrativo— y que el detector de foliatura tiene que NO
+        confundir con la foliatura del legajo.
+        """
+        from punteo import ingesta, ocr
+        ingesta.agregar(self.cx, _pdf_en_margen(paginas, (500, 790)), nombre)
+        ocr.leer_caso(self.cx)
+
+    def cargar_con_sello(self, titulos: list[str], nombre: str = "legajo.pdf"):
+        """Cada página con el sello «FOLIO Nº» arriba a la derecha y SIN número."""
+        from punteo import ingesta, ocr
+        ingesta.agregar(self.cx, _pdf_en_margen([(t, "FOLIO Nº") for t in titulos],
+                                                (430, 70)), nombre)
         ocr.leer_caso(self.cx)
 
     def evidencias(self, **kw):

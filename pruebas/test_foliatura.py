@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import unittest
 
-from comun import CasoDePrueba
+from comun import CasoDePrueba, CasoVacio
 
 
 class FojaYPaginaSonDistintas(CasoDePrueba):
@@ -270,6 +270,153 @@ class FoliaturaQueSeCorta(CasoDePrueba):
                                   WHERE numero_global >= 20
                                     AND foja_etiqueta IS NOT NULL""").fetchone()[0]
         self.assertEqual(sin, 0, "se inventaron fojas donde el papel no las tiene")
+
+
+class DosSeriesQueSeContradicen(CasoVacio):
+    """
+    La paginación interna de un documento no es la foliatura del legajo.
+
+    El caso que lo hizo evidente fue un legajo de verdad: dos informes seguidos, cada
+    uno numerando sus propias hojas al pie —1, 2, 3…— y el detector los tomó por dos
+    tramos de foliatura, con confianzas de 0.8 y 0.89. Ofrecía «foja 3» para una hoja
+    que en el papel es la foja 1130, sellada a mano. Alcanzaba con que alguien
+    confirmara el tramo para que ese número entrara a un requerimiento.
+
+    Lo que los delata no es la zona ni la confianza: es que se contradicen. La foja no
+    retrocede cuando avanza la página, y dos hojas distintas no son la misma foja.
+    """
+
+    def _tramo(self, desde, hasta, desplazamiento):
+        from punteo.foliatura import Tramo
+        return Tramo("inf_der", desde, hasta, desplazamiento, hasta - desde + 1, 0)
+
+    def test_dos_tramos_que_se_pisan_caen_los_dos(self):
+        from punteo import foliatura
+        # fojas 3–6 en las páginas 4–7, y fojas 2–11 en las páginas 30–39: la foja
+        # retrocede de 6 a 2 mientras la página avanza de 7 a 30.
+        quedan, caen = foliatura.coherentes(
+            [self._tramo(4, 7, -1), self._tramo(30, 39, -28)])
+        self.assertEqual(quedan, [])
+        self.assertEqual(len(caen), 2,
+                         "no se elige el más creíble: la contradicción no dice cuál era")
+
+    def test_un_tramo_que_no_contradice_a_nadie_sobrevive(self):
+        from punteo import foliatura
+        # 100–109 y 200–209 en páginas que avanzan: dos etapas de foliatura, normal.
+        quedan, caen = foliatura.coherentes(
+            [self._tramo(1, 10, 99), self._tramo(50, 59, 150)])
+        self.assertEqual(len(quedan), 2)
+        self.assertEqual(caen, [])
+
+    def test_el_que_se_salva_no_se_lleva_puesto_al_que_no(self):
+        from punteo import foliatura
+        quedan, caen = foliatura.coherentes(
+            [self._tramo(1, 10, 99),      # fojas 100–109
+             self._tramo(20, 29, 80),     # fojas 100–109 otra vez: choca con el primero
+             self._tramo(60, 69, 240)])   # fojas 300–309: no choca con nadie
+        self.assertEqual([t.desde_global for t in quedan], [60])
+        self.assertEqual([t.desde_global for t in caen], [1, 20])
+
+    def test_sobre_el_papel_no_queda_ninguna_foja(self):
+        """De punta a punta: dos documentos que se numeran solos no dan foliatura."""
+        from punteo import foliatura
+        # Cada documento numera sus hojas al pie, a la derecha, desde 1.
+        paginas = []
+        for doc in range(2):
+            for hoja in range(1, 7):
+                paginas.append((f"INFORME DEL ORGANISMO {doc + 1}", str(hoja)))
+        self.cargar_con_pie(paginas)
+        r = foliatura.detectar(self.cx)
+
+        self.assertEqual(r["tramos"], 0)
+        self.assertEqual(r["paginas_con_foja"], 0)
+        self.assertEqual(r["series_descartadas"], 2)
+        sin_foja = self.cx.execute(
+            "SELECT COUNT(*) FROM pagina WHERE foja_etiqueta IS NOT NULL").fetchone()[0]
+        self.assertEqual(sin_foja, 0, "se ofreció como foja la hoja interna de un informe")
+
+    def test_la_serie_descartada_queda_con_su_motivo(self):
+        """
+        Descartar en silencio es peor que no descartar: quien mira el legajo ve números
+        en el margen, ve «no se detectó foliatura», y no sabe si el sistema miró.
+        """
+        from punteo import foliatura
+        paginas = []
+        for doc in range(2):
+            for hoja in range(1, 7):
+                paginas.append((f"INFORME DEL ORGANISMO {doc + 1}", str(hoja)))
+        self.cargar_con_pie(paginas)
+        foliatura.detectar(self.cx)
+
+        r = foliatura.resumen(self.cx)
+        self.assertEqual(r["tramos"], [])
+        self.assertEqual(len(r["tramos_descartados"]), 2)
+        for t in r["tramos_descartados"]:
+            self.assertEqual(t["descartado"], foliatura.MOTIVO_CONTRADICCION)
+
+
+class ElSelloDeFolioSinNumero(CasoVacio):
+    """
+    «FOLIO Nº ____» impreso y el número a mano adentro. Es como se folia de verdad en
+    buena parte de los legajos, y Tesseract no lee manuscrita.
+
+    Una hoja así no tiene foja para el sistema, pero sí la tiene en el papel. Dejarla
+    junto a las hojas sin foliar invita a pasarla de largo; marcarla dice dónde hay un
+    número para copiar.
+    """
+
+    def test_el_sello_del_margen_se_marca(self):
+        from punteo import foliatura
+        self.cargar_con_sello(["ACTA DE DECLARACIÓN TESTIMONIAL"] * 3)
+        foliatura.detectar(self.cx)
+
+        filas = self.cx.execute("""SELECT foja_etiqueta, foja_origen, foja_lectura
+                                     FROM pagina ORDER BY numero_global""").fetchall()
+        self.assertTrue(filas)
+        for f in filas:
+            self.assertIsNone(f["foja_etiqueta"], "se inventó un número que nadie leyó")
+            self.assertEqual(f["foja_origen"], "desconocida")
+            self.assertEqual(f["foja_lectura"], "sello_ilegible")
+        self.assertEqual(foliatura.resumen(self.cx)["sellos_sin_leer"], len(filas))
+
+    def test_borrar_una_foja_a_mano_devuelve_la_marca_del_sello(self):
+        """
+        El sello no se va porque alguien haya cargado y después borrado la foja. Sin
+        esto, la hoja se quedaba sin esa pista hasta el próximo reproceso, que es
+        justamente cuando nadie la está mirando.
+        """
+        from punteo import foliatura
+        self.cargar_con_sello(["ACTA DE DECLARACIÓN TESTIMONIAL"] * 3)
+        foliatura.detectar(self.cx)
+
+        foliatura.fijar(self.cx, 1, "1130")
+        self.assertIsNone(self.cx.execute(
+            "SELECT foja_lectura FROM pagina WHERE numero_global=1").fetchone()[0])
+
+        r = foliatura.fijar(self.cx, 1, None)
+        self.assertTrue(r["sello_sin_leer"])
+        self.assertEqual(self.cx.execute(
+            "SELECT foja_lectura FROM pagina WHERE numero_global=1").fetchone()[0],
+            "sello_ilegible")
+
+    def test_la_palabra_folio_en_el_cuerpo_no_cuenta(self):
+        """
+        «obrante a folio 23» habla de otra pieza, no de esta hoja.
+
+        Por eso el sello se busca en el margen y no en el texto: en prosa jurídica la
+        palabra aparece todo el tiempo citando fojas ajenas, y marcar cada una de esas
+        páginas sería mandar a revisar medio legajo por nada.
+        """
+        from punteo import foliatura
+        self.cargar([["ACTA DE DECLARACIÓN TESTIMONIAL",
+                      "En la ciudad de Paraná, a los 3 días del mes de marzo de 2026,",
+                      "comparece el testigo citado conforme lo resuelto oportunamente,",
+                      "y se agrega el informe obrante a folio 23 del legajo."]] * 3)
+        foliatura.detectar(self.cx)
+
+        marcadas = self.cx.execute("""SELECT COUNT(*) FROM pagina
+                                       WHERE foja_lectura='sello_ilegible'""").fetchone()[0]
+        self.assertEqual(marcadas, 0)
 
 
 class EtiquetasDeFoja(unittest.TestCase):

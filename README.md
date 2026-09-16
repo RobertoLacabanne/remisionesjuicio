@@ -138,6 +138,7 @@ docs/                                 arquitectura, identidad, hitos
 * [`docs/IDENTIDAD.md`](docs/IDENTIDAD.md) — cómo se ve y por qué
 * [`docs/REUTILIZACION-APPUFIL.md`](docs/REUTILIZACION-APPUFIL.md) — qué se tomó del proyecto anterior
 * [`docs/REVISION-ADVERSARIAL.md`](docs/REVISION-ADVERSARIAL.md) — dónde puede fallar
+* [`docs/LEGAJO-REAL.md`](docs/LEGAJO-REAL.md) — qué falló la primera vez que entró un legajo de verdad
 * [`docs/HITOS.md`](docs/HITOS.md) — qué está hecho, qué falta y en qué orden conviene seguir
 * [`CLAUDE.md`](CLAUDE.md) y [`AGENTS.md`](AGENTS.md) — reglas para quien siga desarrollando
 

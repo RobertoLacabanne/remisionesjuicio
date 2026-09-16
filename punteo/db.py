@@ -11,7 +11,7 @@ from . import config
 # Se sube cuando cambia `esquema.sql`. Sirve para no reejecutar el script en cada
 # conexión: el servidor es multihilo y dos conexiones corriendo el esquema a la vez
 # chocan al recrear una vista, que es un DROP seguido de un CREATE y no es atómico.
-ESQUEMA_VERSION = 3
+ESQUEMA_VERSION = 4
 
 _candado = threading.Lock()
 
@@ -43,6 +43,8 @@ COLUMNAS_AGREGADAS: tuple[tuple[str, str, str], ...] = (
     ("punteo_generado", "exigir_foja_confirmada", "INTEGER NOT NULL DEFAULT 1"),
     # De qué sector es cada encabezado del punteo (ver esquema.sql).
     ("punteo_parrafo", "clave_grupo", "TEXT"),
+    # Por qué una serie de números del margen no se usó como foliatura (ver esquema.sql).
+    ("tramo_foliatura", "descartado", "TEXT"),
 )
 
 
