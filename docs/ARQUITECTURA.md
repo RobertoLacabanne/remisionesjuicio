@@ -183,6 +183,18 @@ con su marca; una `confirmada` la miró una persona. **El generador exige que la
 toda evidencia incluida esté confirmada o cargada a mano, y si no lo está avisa antes de
 generar en lugar de escribir un número que nadie verificó.**
 
+Una cita tiene **dos** fojas, y cada extremo tiene su origen: `v_evidencia` expone
+`foja_origen` (inicio), `foja_fin_origen` y `foja_firme`, que es verdadero sólo si los
+dos están confirmados o cargados a mano. Con un único origen, confirmar la foja donde
+empieza una pieza hacía pasar por verificada la foja donde termina. Si a una pieza de
+varias páginas le falta la foja final, la cita sale `fs. 409/[FOJA PENDIENTE]` y no
+`fs. 409`; si adentro del rango la foliatura salta —otro tramo en el medio—, sale con
+`[RANGO DE FOJAS A REVISAR]`.
+
+`pagina.foja_lectura` distingue además cómo se obtuvo el número: `leida` en el papel,
+`interpolada` desde el tramo, o `desconocida` en las bases anteriores a esa columna.
+Confirmar un tramo no convierte en leído lo interpolado, y el chequeo previo lo cuenta.
+
 Un legajo sin foliar es un caso normal, no un error: todas las páginas quedan en
 `desconocida`, el sistema funciona igual usando `numero_global` como referencia técnica,
 y las fojas se completan después, cuando el legajo se folie o cuando la persona las
@@ -256,6 +268,14 @@ división guarda en `origen_id` de cuál salió; una unión guarda todas sus par
 `evidencia_parte`. Así se puede contestar «¿de dónde salió esta pieza?» y, sobre todo,
 deshacer.
 
+**Una pieza excluida no se une ni se divide.** La pieza nueva copia la descripción de
+su origen, así que excluir A, unirla con B e incluir la unión sacaba al escrito la
+descripción de A con A todavía excluida. Hay que volverla a pendiente primero, y esa
+decisión queda en el historial. Por la misma razón, incluir una pieza controla su linaje
+completo —partes de uniones y origen de divisiones, recursivamente—, y `restaurar` sólo
+enciende lo que se apagó por un **descarte**: lo absorbido por una unión se recupera
+deshaciendo la unión, desde arriba hacia abajo.
+
 `origen` distingue cómo nació cada una: `automatica`, `manual`, `division`, `union`. La
 evidencia manual es ciudadana de primera y no lleva ninguna marca de segunda categoría;
 lo único que la distingue es que su confianza no existe, porque no hay nada que medir en
@@ -290,9 +310,18 @@ llama con el nombre obvio a propósito: un `SELECT` futuro que se escriba apurad
 que salir seguro.
 
 **Segunda, en el código.** La función que arma el punteo recibe una lista de piezas y
-**verifica el estado de cada una antes de escribirla**, aunque ya vengan filtradas. La
-redundancia se paga sola: las dos barreras las escriben caminos distintos y si una
-queda mal, la otra sigue.
+**verifica el estado de cada una antes de escribirla**, aunque ya vengan filtradas, y
+verifica también que no haya salido de una pieza excluida. La redundancia se paga sola:
+las dos barreras las escriben caminos distintos y si una queda mal, la otra sigue. El
+armado y el guardado van adentro de un mismo `BEGIN IMMEDIATE`: si la barrera controla
+y otra pestaña excluye antes de que se escriba, el control no dice nada.
+
+**Y al exportar.** El punteo se guarda como texto, así que todo lo que cambie después
+—una exclusión, pero también una descripción corregida, una foja confirmada, un testigo,
+el orden, el tipo de proceso— lo deja viejo. `revalidar` vuelve a armar el punteo en
+memoria con los mismos parámetros y lo compara con el guardado; si difiere en algo, la
+exportación se niega. Al regenerar, las ediciones a mano pasan al punteo nuevo sólo si
+el texto generado de su párrafo es idéntico, y se informa cuántas quedaron atrás.
 
 **Tercera, en las pruebas.** `pruebas/test_invariante.py` arma un caso con piezas en
 los tres estados, cambia estados de ida y de vuelta, genera, y verifica que en la
@@ -332,9 +361,17 @@ página que está mirando y esa se rasteriza en el momento y se guarda en una ca
 tope de tamaño, en JPEG de calidad alta, que para un escaneo pesa entre un quinto y un
 décimo de lo que pesa el PNG. La caché se puede borrar entera sin perder nada.
 
-**La interfaz no carga la lista entera.** El checklist y la tira de páginas se sirven
-paginados y se virtualizan en el navegador. Una lista de ochocientas piezas en el DOM
-es lo que convierte una herramienta rápida en una que hay que esperar.
+**La interfaz no dibuja la lista entera.** El servidor entrega las piezas de a
+quinientas y la interfaz las pide todas, tanda por tanda: revisar tiene que poder llegar
+a la última, y la primera versión se quedaba en la quinientos. Lo que se dosifica es el
+DOM: el checklist dibuja quinientas filas y ofrece las siguientes, sin perder la
+selección. La tira de páginas agrupa marcas por encima de trescientas. No hay
+virtualización propiamente dicha.
+
+**La imagen se identifica por el documento, no por el número de página.** La caché y la
+etiqueta que revalida el navegador usan el SHA-256 del PDF, la página dentro de él, la
+rotación y el DPI. El número global se mueve al reordenar los PDF, y con esa clave el
+visor mostraba la hoja de otro documento al lado de los datos del correcto.
 
 El OCR reparte las páginas entre los núcleos disponibles, como en AppUFIL, y confirma a
 la base cada pocas páginas: un corte de luz a los ochenta minutos no puede costar los
@@ -355,7 +392,20 @@ observaciones— guarda con `debounce` corto y muestra su propio estado.
 
 Cada cambio relevante deja una fila en `revision`: qué evidencia, qué campo, valor
 anterior, valor nuevo, cuándo. Es append-only y nunca se pisa, porque corregir dos veces
-no puede borrar la explicación de la primera corrección.
+no puede borrar la explicación de la primera corrección. El orden manual también se
+anota: lo que no deja rastro, la redetección lo trata como descartable.
+
+**Volver a detectar no pisa nada.** La detección propone sólo sobre páginas que ninguna
+pieza vigente cubre —activa, descartada a propósito, o representada por lo que salió de
+ella—, y cada pieza cubre sólo páginas de su propio documento. Así, cargar otro PDF
+propone su evidencia sin tocar lo revisado. «Rehacer» reemplaza únicamente las
+propuestas que nadie tocó —sin decisión, corrección, testigo, sector, etiqueta,
+duplicado resuelto ni historial— y deja constancia en `revision`. Las dos operaciones
+toman el candado de escritura antes de leer la cobertura.
+
+**Una base más nueva no se abre.** Si `user_version` es mayor que la que entiende el
+programa, `db.inicializar` corta antes de tocar nada: el esquema viejo pisaría las
+vistas nuevas y se llevaría sus controles.
 
 ---
 
@@ -371,7 +421,22 @@ registran contenido de documentos ni texto OCR: registran método, ruta, código
 duración.
 
 Hay una prueba que verifica que en el código del paquete no aparezcan `http://`,
-`https://` ni llamadas a `urllib`/`socket` fuera del servidor local.
+`https://` ni llamadas a `urllib`/`socket` fuera del servidor local. La única excepción
+es `acceso.py`, que abre un socket UDP sin mandar nada para averiguar la IP de la
+máquina, y está listada por nombre en la prueba.
+
+Escuchar en `127.0.0.1` no alcanza contra el navegador de quien usa el sistema. Por eso:
+ninguna ruta que cambie algo se atiende por `GET`; las escrituras con `Origin` ajeno o
+`Sec-Fetch-Site: cross-site` se rechazan; y sin clave, la cabecera `Host` tiene que ser
+local —o estar en `PUNTEO_HOSTS`—, que es la defensa contra el rebinding de DNS.
+
+Los originales se guardan en `0444` y se comprueba que hayan quedado así: si el sistema
+de archivos no respeta el permiso, la carga se corta. Para una carpeta que no puede
+respetarlo existe `PUNTEO_ORIGINALES_SIN_PROTECCION=aceptar`, una decisión explícita
+de quien instala; con ella la carga sigue, pero queda anotada y la pantalla lo avisa.
+Un archivo que existe con el nombre de un hash y no hashea eso no se acepta ni se
+reemplaza. Ese control ocurre al cargar: que el archivo siga intacto después lo
+contesta `almacen.verificar`, que rehashea.
 
 ---
 

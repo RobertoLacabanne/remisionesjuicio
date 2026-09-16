@@ -38,9 +38,10 @@ qué párrafo es. Está cubierto por
   debería intentarlo: es texto de la persona.
 * `punteo_parrafo.texto_final` no se revalida contra nada. Si alguien copia y pega una
   descripción excluida adentro de otro párrafo, sale.
-* **[PARA CODEX]** Falta buscar un camino por el que una unión arrastre contenido de una
-  parte excluida al `texto_origen` de la pieza nueva y de ahí a una descripción. Hoy hay
-  una advertencia (`union_con_excluida`) pero es una advertencia, no una barrera.
+* ~~**[PARA CODEX]** Falta buscar un camino por el que una unión arrastre contenido de
+  una parte excluida.~~ **Resuelto después de la revisión de Codex:** existía, y ahora es
+  una barrera. Una excluida no se une ni se divide; incluir una pieza y generar
+  controlan su linaje completo. Ver `test_invariante.LoExcluidoNoVuelvePorOtraPuerta`.
 
 ---
 
@@ -152,9 +153,9 @@ entre núcleos y confirma cada diez. El checklist se sirve paginado.
 * La tira de fojas dibuja **un botón por página**. Con 5.000 páginas son 5.000 nodos en
   el DOM, y eso sí es un problema medible. **No está virtualizada.** Es el defecto de
   rendimiento más concreto que tiene la interfaz hoy.
-* `cargarEvidencias` pide hasta 500 piezas de una. Un legajo con más de 500 piezas
-  muestra las primeras 500 en la pantalla de revisión y la navegación con flechas no
-  pasa de ahí.
+* ~~`cargarEvidencias` pide hasta 500 piezas de una.~~ **Resuelto:** pide todas, de a
+  tandas, y el checklist dibuja de a quinientas filas conservando la selección.
+  Verificado en un navegador con 620 piezas.
 * **[PARA CODEX]** Medir de verdad con 500, 2.000 y 5.000 páginas, y con varios PDF.
 
 ---
