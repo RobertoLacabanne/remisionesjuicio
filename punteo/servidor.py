@@ -190,7 +190,8 @@ def api_paginas(pet, slug: str) -> dict:
         limite = min(500, _entero(pet.consulta("limite"), "limite", 100))
         filas = cx.execute("""
             SELECT p.numero_global, p.numero_pdf, p.foja_etiqueta, p.foja_origen,
-                   p.foja_confianza, p.confianza, p.documento_id, d.nombre_archivo,
+                   p.foja_lectura, p.foja_confianza, p.confianza, p.documento_id,
+                   d.nombre_archivo,
                    -- El tamaño va en la lista y no en el pedido de cada página: el
                    -- visor lo necesita para ubicar el recuadro del fragmento, y pedirlo
                    -- de a una página sería una ida y vuelta por cada foja que se pasa.

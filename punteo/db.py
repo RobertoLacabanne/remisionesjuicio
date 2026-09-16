@@ -11,7 +11,7 @@ from . import config
 # Se sube cuando cambia `esquema.sql`. Sirve para no reejecutar el script en cada
 # conexión: el servidor es multihilo y dos conexiones corriendo el esquema a la vez
 # chocan al recrear una vista, que es un DROP seguido de un CREATE y no es atómico.
-ESQUEMA_VERSION = 1
+ESQUEMA_VERSION = 2
 
 _candado = threading.Lock()
 
@@ -35,7 +35,22 @@ def conectar(ruta: Path | None = None) -> sqlite3.Connection:
 # suma a una base ya creada, así que hay que pedirlas una por una. Es la forma barata
 # de migrar sin perder lo que hay adentro: un DROP TABLE acá borraría el trabajo de
 # revisión, que es lo único del sistema que no se regenera.
-COLUMNAS_AGREGADAS: tuple[tuple[str, str, str], ...] = ()
+COLUMNAS_AGREGADAS: tuple[tuple[str, str, str], ...] = (
+    # Si el número de foja se leyó en la página o se dedujo del tramo (ver esquema.sql).
+    # En una base vieja queda NULL, que es lo correcto: de esas páginas no se sabe.
+    ("pagina", "foja_lectura", "TEXT"),
+)
+
+
+# Qué escribir en una columna recién agregada para las filas que ya estaban. Sin esto,
+# una base vieja queda con NULL, y un NULL que la aplicación lee como «todo en orden» es
+# peor que un dato que falta: acá una foja puesta por la máquina hace años pasaría por
+# leída en el papel. `desconocida` dice lo que de verdad se sabe.
+RELLENOS = {
+    "pagina.foja_lectura":
+        "UPDATE pagina SET foja_lectura='desconocida' "
+        " WHERE foja_lectura IS NULL AND foja_origen IN ('detectada','confirmada')",
+}
 
 
 def _agregar_columnas_faltantes(cx: sqlite3.Connection) -> list[str]:
@@ -49,12 +64,33 @@ def _agregar_columnas_faltantes(cx: sqlite3.Connection) -> list[str]:
             continue
         if columna not in existentes:
             cx.execute(f"ALTER TABLE {tabla} ADD COLUMN {columna} {tipo}")
+            relleno = RELLENOS.get(f"{tabla}.{columna}")
+            if relleno:
+                cx.execute(relleno)
             agregadas.append(f"{tabla}.{columna}")
     return agregadas
 
 
+class BaseMasNueva(RuntimeError):
+    """
+    La base la escribió una versión posterior del programa.
+
+    Se corta antes de tocar nada. Abrirla igual sería peor que no abrirla: el esquema
+    viejo pisa las vistas nuevas, baja el número de versión y se lleva puestas las
+    garantías que esa versión agregó —por ejemplo, exigir que las dos fojas de una cita
+    estén confirmadas—. Y eso pasa en silencio, sobre el trabajo de revisión, que es lo
+    único que no se regenera.
+    """
+
+
 def inicializar(cx: sqlite3.Connection, *, forzar: bool = False) -> bool:
     """Aplica el esquema si hace falta. Devuelve True si lo aplicó."""
+    version = cx.execute("PRAGMA user_version").fetchone()[0]
+    if version > ESQUEMA_VERSION:
+        raise BaseMasNueva(
+            f"esta base es de la versión {version} del esquema y este programa entiende "
+            f"hasta la {ESQUEMA_VERSION}. Actualizá el programa: abrirla con esta versión "
+            f"le sacaría los controles que la versión nueva agregó.")
     # Las columnas faltantes se chequean SIEMPRE, aunque la versión ya esté al día: una
     # base que quedó a mitad de camino —el número subió pero el ALTER no llegó a
     # correr— se quedaría rota para siempre y sin forma de arreglarse sola.

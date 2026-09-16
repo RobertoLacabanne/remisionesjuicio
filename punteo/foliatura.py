@@ -218,7 +218,7 @@ def detectar(cx: sqlite3.Connection) -> dict:
     cx.execute("UPDATE pagina SET tramo_id = NULL")
     cx.execute("DELETE FROM tramo_foliatura")
     cx.execute("""UPDATE pagina SET foja_etiqueta=NULL, foja_num=NULL, foja_sufijo='',
-                         foja_origen='desconocida', foja_confianza=NULL
+                         foja_origen='desconocida', foja_confianza=NULL, foja_lectura=NULL
                    WHERE foja_origen = 'detectada'""")
 
     escritas = 0
@@ -239,9 +239,11 @@ def detectar(cx: sqlite3.Connection) -> dict:
             # la confianza del tramo se castiga cuando el número no se leyó ahí.
             conf = t.confianza if leida else round(t.confianza * 0.7, 3)
             cx.execute("""UPDATE pagina SET foja_etiqueta=?, foja_num=?, foja_sufijo='',
-                                 foja_origen='detectada', foja_confianza=?, tramo_id=?
+                                 foja_origen='detectada', foja_confianza=?, tramo_id=?,
+                                 foja_lectura=?
                            WHERE numero_global=?""",
-                       (etiqueta_foja(num), num, conf, tramo_id, g))
+                       (etiqueta_foja(num), num, conf, tramo_id,
+                        "leida" if leida else "interpolada", g))
             escritas += 1
 
     # Las fojas con sufijo se escriben después, y pisan lo interpolado: una lectura
@@ -250,7 +252,8 @@ def detectar(cx: sqlite3.Connection) -> dict:
         if g in protegidas:
             continue
         cx.execute("""UPDATE pagina SET foja_etiqueta=?, foja_num=?, foja_sufijo=?,
-                             foja_origen='detectada', foja_confianza=? WHERE numero_global=?""",
+                             foja_origen='detectada', foja_confianza=?, foja_lectura='leida'
+                       WHERE numero_global=?""",
                    (c.etiqueta, c.num, c.sufijo, round(0.5 + 0.4 * c.conf, 3), g))
         escritas += 1
 
@@ -271,7 +274,7 @@ def fijar(cx: sqlite3.Connection, numero_global: int, etiqueta: str | None, *,
     """
     if etiqueta is None or not str(etiqueta).strip():
         cx.execute("""UPDATE pagina SET foja_etiqueta=NULL, foja_num=NULL, foja_sufijo='',
-                             foja_origen='desconocida', foja_confianza=NULL
+                             foja_origen='desconocida', foja_confianza=NULL, foja_lectura=NULL
                        WHERE numero_global=?""", (numero_global,))
         cx.commit()
         return {"numero_global": numero_global, "foja": None, "origen": "desconocida"}
@@ -280,10 +283,13 @@ def fijar(cx: sqlite3.Connection, numero_global: int, etiqueta: str | None, *,
     if not partido:
         raise ValueError(f"«{etiqueta}» no parece una foja (se espera 411, 411 vta. o 411 bis)")
     num, sufijo = partido
+    # `foja_lectura` vuelve a NULL: lo que escribió una persona no es ni una lectura del
+    # OCR ni una interpolación del tramo, y decir que es «leída» sería mezclar dos cosas
+    # que el sistema existe para distinguir.
     cx.execute("""UPDATE pagina SET foja_etiqueta=?, foja_num=?, foja_sufijo=?,
-                         foja_origen=?, foja_confianza=1.0 WHERE numero_global=?""",
-               (etiqueta_foja(num, sufijo), num, sufijo,
-                "manual" if not confirmada else "manual", numero_global))
+                         foja_origen='manual', foja_confianza=1.0, foja_lectura=NULL
+                   WHERE numero_global=?""",
+               (etiqueta_foja(num, sufijo), num, sufijo, numero_global))
     cx.commit()
     return {"numero_global": numero_global, "foja": etiqueta_foja(num, sufijo),
             "origen": "manual"}
@@ -312,7 +318,10 @@ def resumen(cx: sqlite3.Connection) -> dict:
                COALESCE(SUM(foja_origen='desconocida'),0) AS desconocidas,
                COALESCE(SUM(foja_origen='detectada'),0)   AS detectadas,
                COALESCE(SUM(foja_origen='confirmada'),0)  AS confirmadas,
-               COALESCE(SUM(foja_origen='manual'),0)      AS manuales
+               COALESCE(SUM(foja_origen='manual'),0)      AS manuales,
+               -- Cuántas fojas no se leyeron en el papel: se dedujeron de la serie.
+               -- Confirmar un tramo no las convierte en leídas, así que se cuentan aparte.
+               COALESCE(SUM(foja_lectura='interpolada'),0) AS interpoladas
           FROM pagina""").fetchone()
     tramos = [dict(r) for r in cx.execute(
         "SELECT * FROM tramo_foliatura ORDER BY desde_global")]

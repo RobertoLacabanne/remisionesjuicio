@@ -128,6 +128,23 @@ class EvidenciaCargadaAMano(CasoDePrueba):
         generacion.generar(self.cx)
         self.assertIn("que el sistema no detectó", exportacion.a_texto(self.cx))
 
+    def test_las_fojas_en_blanco_salen_de_la_pagina_y_no_pasan_por_escritas(self):
+        """
+        El formulario ofrece las fojas de la página. Si se guardan igual, quedan en las
+        columnas `_final` y el sistema las trata como verificadas por una persona: una
+        pieza de cinco fojas salía «fs. 400», sin marca y sin el rango.
+        """
+        from punteo.evidencia import modelo
+        nueva = modelo.crear_manual(
+            self.cx, pagina_inicio=5, pagina_fin=7, descripcion="Planilla sin título",
+            foja_inicio="", foja_fin="   ")
+        self.assertEqual(nueva["foja_origen"], "detectada")
+        self.assertEqual(nueva["foja_inicio"], "404")
+        self.assertEqual(nueva["foja_fin"], "406")
+        self.assertFalse(nueva["foja_firme"])
+        self.assertIsNone(self.cx.execute(
+            "SELECT foja_inicio_final FROM evidencia WHERE id=?", (nueva["id"],)).fetchone()[0])
+
     def test_sin_descripcion_no_se_crea(self):
         from punteo.evidencia import modelo
         with self.assertRaises(modelo.OperacionInvalida):

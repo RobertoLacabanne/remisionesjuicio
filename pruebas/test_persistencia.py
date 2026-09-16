@@ -317,6 +317,63 @@ class ReprocesarNoPisaElTrabajo(CasoDePrueba):
         self.assertEqual(r["paginas"], 0, "volvió a leer páginas que ya tenían texto")
 
 
+class MigracionDeEsquema(CasoDePrueba):
+    """
+    Migrar una base con trabajo adentro es la operación más peligrosa del sistema: si
+    sale mal, se lleva lo único que no se regenera.
+    """
+
+    def test_una_base_mas_nueva_no_se_abre_a_la_fuerza(self):
+        """
+        Abrir con un programa viejo una base que escribió uno nuevo le sacaba las
+        garantías que el nuevo agregó —y le bajaba el número de versión— sin decir nada.
+        """
+        from punteo import casos, db
+        self.cx.execute(f"PRAGMA user_version={db.ESQUEMA_VERSION + 5}")
+        self.cx.commit()
+        self.cx.close()
+        with self.assertRaises(db.BaseMasNueva):
+            casos.abrir(self.caso.slug)
+        # Y no la tocó: la versión sigue donde estaba.
+        from punteo import config
+        cx = db.conectar(config.carpeta_caso(self.caso.slug) / "punteo.sqlite")
+        try:
+            self.assertEqual(cx.execute("PRAGMA user_version").fetchone()[0],
+                             db.ESQUEMA_VERSION + 5)
+            cx.execute(f"PRAGMA user_version={db.ESQUEMA_VERSION}")
+            cx.commit()
+        finally:
+            cx.close()
+        self.cx = casos.abrir(self.caso.slug)       # para el cleanup de la clase base
+
+    def test_una_foja_heredada_no_pasa_por_leida(self):
+        """
+        En una base anterior a `foja_lectura` no se sabe si el número se leyó o se
+        dedujo. La migración lo dice —`desconocida`— en lugar de dejar un NULL que la
+        pantalla lee como «todo en orden».
+        """
+        from punteo import casos
+        self.cx.execute("DROP VIEW IF EXISTS v_evidencia_incluida")
+        self.cx.execute("DROP VIEW IF EXISTS v_contadores")
+        self.cx.execute("DROP VIEW IF EXISTS v_evidencia")
+        try:
+            self.cx.execute("ALTER TABLE pagina DROP COLUMN foja_lectura")
+        except Exception as e:                       # SQLite viejo: no se puede probar acá
+            self.skipTest(f"esta versión de SQLite no puede sacar la columna: {e}")
+        self.cx.execute("PRAGMA user_version=1")
+        self.cx.commit()
+        self.cx.close()
+
+        self.cx = casos.abrir(self.caso.slug)        # acá corre la migración
+        heredadas = self.cx.execute(
+            """SELECT COUNT(*) FROM pagina
+                WHERE foja_origen='detectada' AND foja_lectura IS NOT 'desconocida'"""
+        ).fetchone()[0]
+        self.assertEqual(heredadas, 0)
+        self.assertTrue(self.evidencias()[0]["foja_interpolada"],
+                        "una foja de procedencia desconocida pasó por leída")
+
+
 class ReordenarDocumentos(CasoDePrueba):
     """
     Reordenar los PDF corre la numeración global debajo de la evidencia ya cargada.

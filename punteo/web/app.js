@@ -47,7 +47,9 @@ function conMarcadores(s) {
   return esc(s)
     .replace(/\[FOJA PENDIENTE\]/g, '<span class="marcador duro">[FOJA PENDIENTE]</span>')
     .replace(/\[TESTIGO PENDIENTE\]/g, '<span class="marcador duro">[TESTIGO PENDIENTE]</span>')
-    .replace(/\[FOJA A CONFIRMAR\]/g, '<span class="marcador">[FOJA A CONFIRMAR]</span>');
+    .replace(/\[FOJA A CONFIRMAR\]/g, '<span class="marcador">[FOJA A CONFIRMAR]</span>')
+    .replace(/\[RANGO DE FOJAS A REVISAR\]/g,
+             '<span class="marcador duro">[RANGO DE FOJAS A REVISAR]</span>');
 }
 
 async function api(ruta, opciones = {}) {
@@ -481,8 +483,13 @@ async function irAPagina(numero, resalte) {
   const sello = $('#sello-foja');
   const origen = pag ? pag.foja_origen : 'desconocida';
   sello.className = `sello-foja ${origen}`;
-  sello.textContent = { desconocida: 'sin foja', detectada: 'detectada',
-                        confirmada: 'confirmada', manual: 'a mano' }[origen] || origen;
+  // Si el número se dedujo del tramo y no se leyó en esta hoja, se dice. Confirmar un
+  // tramo de cuarenta fojas no convierte en leído lo que nadie leyó, y es justo donde
+  // una hoja intercalada corre la numeración.
+  const interpolada = pag && pag.foja_lectura === 'interpolada' ? ' · interpolada' : '';
+  sello.textContent = ({ desconocida: 'sin foja', detectada: 'detectada',
+                         confirmada: 'confirmada', manual: 'a mano' }[origen] || origen)
+                      + interpolada;
   pintarResalte(resalte);
   pintarTira();
 }
@@ -565,8 +572,10 @@ async function abrirEvidencia(indice) {
 }
 
 const ADVERTENCIAS = {
-  foja_sin_confirmar: ['La foja no está confirmada', false],
+  foja_sin_confirmar: ['La foja no está confirmada en los dos extremos', false],
+  foja_interpolada: ['Una de las fojas no se leyó en el papel: se dedujo de la serie', false],
   sin_foja: ['Sin foja: el escrito va a salir con un marcador', true],
+  sin_foja_final: ['Falta la foja del final: la cita saldría como una sola foja', true],
   ocr_pobre: ['El OCR leyó mal estas páginas', true],
   sin_titulo: ['No se reconoció un título: revisá dónde empieza y dónde termina', false],
   pieza_larga: ['Pieza muy larga: puede que adentro haya más de un documento', false],
@@ -821,15 +830,23 @@ $('#nueva-evidencia').onclick = async () => {
     titulo: `Nueva pieza desde la página ${E.pagina}`,
     ayuda: 'La evidencia cargada a mano se integra igual que la automática: mismo ' +
            'checklist, mismo orden, mismo generador. Lo único que no tiene es confianza, ' +
-           'porque no hay nada que medir en algo que escribió una persona.',
+           'porque no hay nada que medir en algo que escribió una persona. ' +
+           'Las fojas se pueden dejar <b>vacías</b>: salen de las páginas y se corrigen ' +
+           'desde el visor. Escribilas sólo si el papel dice otra cosa.',
     campos: [
       { nombre: 'descripcion', rotulo: 'Descripción', tipo: 'textarea' },
       { nombre: 'tipo', rotulo: 'Tipo', tipo: 'select', valor: 'sin_clasificar',
         opciones: (E.catalogo.tipos || []).map(t => ({ valor: t.clave, texto: t.etiqueta })) },
       { nombre: 'pagina_inicio', rotulo: 'Página desde', mono: true, valor: String(E.pagina) },
       { nombre: 'pagina_fin', rotulo: 'Página hasta', mono: true, valor: String(E.pagina) },
-      { nombre: 'foja_inicio', rotulo: 'Foja desde', mono: true, valor: pag.foja_etiqueta || '' },
-      { nombre: 'foja_fin', rotulo: 'Foja hasta', mono: true, valor: pag.foja_etiqueta || '' },
+      // Sin `valor`: precargarlas escribía en las columnas `_final` un número que puso
+      // la máquina, y a partir de ahí el sistema lo trataba como verificado por una
+      // persona. Con la página final movida, además, la foja precargada era la del
+      // principio y la cita salía de una sola foja, sin marca.
+      { nombre: 'foja_inicio', rotulo: 'Foja desde (opcional)', mono: true,
+        marcador: pag.foja_etiqueta || 'sale de la página' },
+      { nombre: 'foja_fin', rotulo: 'Foja hasta (opcional)', mono: true,
+        marcador: pag.foja_etiqueta || 'sale de la página' },
     ], aceptar: 'Crear',
   });
   if (!d) return;
@@ -1145,8 +1162,14 @@ async function cargarPunteo() {
       ${v.pendientes ? linea('avisa', v.pendientes, 'piezas todavía pendientes de decisión') : ''}
       ${v.sin_foja.length ? linea('mal', v.sin_foja.length,
         'piezas incluidas <b>sin foja</b>: el escrito va a salir con un marcador visible') : ''}
+      ${v.sin_foja_final.length ? linea('mal', v.sin_foja_final.length,
+        'piezas de varias páginas <b>sin la foja del final</b>: la cita saldría como una sola foja') : ''}
       ${v.foja_sin_confirmar.length ? linea('avisa', v.foja_sin_confirmar.length,
-        'piezas con foja detectada pero <b>sin confirmar</b>. Confirmá los tramos en <b>Legajo</b>.') : ''}
+        'piezas con alguna foja detectada pero <b>sin confirmar</b> —principio o final—. Confirmá los tramos en <b>Legajo</b>.') : ''}
+      ${v.foja_interpolada.length ? linea('avisa', v.foja_interpolada.length,
+        'piezas cuya foja <b>no se leyó en el papel</b>: se dedujo de la serie') : ''}
+      ${v.fojas_discontinuas.length ? linea('mal', v.fojas_discontinuas.length,
+        'piezas donde la foliatura <b>salta adentro del rango</b>: la cita tapa lo que hay en el medio') : ''}
       ${v.sin_testigo.length ? linea('avisa', v.sin_testigo.length,
         'piezas incluidas <b>sin testigo introductor</b>') : ''}
       ${v.listo ? linea('ok', '✓', 'todo en orden') : ''}

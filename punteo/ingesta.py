@@ -152,7 +152,7 @@ def reordenar(cx: sqlite3.Connection, orden_ids: list[int]) -> None:
         cx.execute("UPDATE pagina SET tramo_id = NULL")
         cx.execute("DELETE FROM tramo_foliatura")
         cx.execute("""UPDATE pagina SET foja_etiqueta=NULL, foja_num=NULL, foja_sufijo='',
-                             foja_origen='desconocida', foja_confianza=NULL
+                             foja_origen='desconocida', foja_confianza=NULL, foja_lectura=NULL
                        WHERE foja_origen = 'detectada'""")
         cx.execute("COMMIT")
     except Exception:

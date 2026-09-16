@@ -90,6 +90,11 @@ CREATE TABLE IF NOT EXISTS pagina (
   -- interfaz la muestra como tal. El generador exige `confirmada` o `manual`.
   foja_origen    TEXT NOT NULL DEFAULT 'desconocida'
                  CHECK (foja_origen IN ('desconocida','detectada','confirmada','manual')),
+  -- Si el número se LEYÓ en esta página o se dedujo del tramo. Son dos cosas distintas y
+  -- confirmarlas no las iguala: quien confirma un tramo de cuarenta fojas mira algunas,
+  -- y las interpoladas son justamente donde una hoja intercalada corre la numeración.
+  -- 'leida' | 'interpolada' | NULL cuando no corresponde (sin foja, o cargada a mano).
+  foja_lectura   TEXT,
   foja_confianza REAL,
   tramo_id       INTEGER REFERENCES tramo_foliatura(id),
 
@@ -406,8 +411,36 @@ SELECT
   -- De dónde sale esa foja. El generador la exige distinta de `desconocida` y de
   -- `detectada`: escribir en un escrito un número que nadie verificó es exactamente
   -- lo que este sistema existe para que no pase.
+  --
+  -- Y son DOS extremos, cada uno con su origen. Con un solo campo —el del inicio—
+  -- confirmar la primera foja de una pieza de cinco hojas hacía pasar por verificado
+  -- todo el rango, y «fs. 409/413» salía sin marca con el 413 puesto por la máquina.
   CASE WHEN e.foja_inicio_final IS NOT NULL THEN 'manual'
        ELSE COALESCE(pi.foja_origen, 'desconocida') END  AS foja_origen,
+  CASE WHEN e.foja_fin_final IS NOT NULL THEN 'manual'
+       WHEN e.pagina_fin IS NULL THEN
+            CASE WHEN e.foja_inicio_final IS NOT NULL THEN 'manual'
+                 ELSE COALESCE(pi.foja_origen, 'desconocida') END
+       ELSE COALESCE(pf.foja_origen, 'desconocida') END  AS foja_fin_origen,
+  -- Los dos extremos mirados por una persona. Es lo que el generador exige y lo que
+  -- cuenta el checklist: una sola respuesta para «¿esta cita se puede firmar?».
+  (CASE WHEN e.foja_inicio_final IS NOT NULL THEN 'manual'
+        ELSE COALESCE(pi.foja_origen, 'desconocida') END IN ('confirmada','manual')
+   AND CASE WHEN e.foja_fin_final IS NOT NULL THEN 'manual'
+            WHEN e.pagina_fin IS NULL THEN
+                 CASE WHEN e.foja_inicio_final IS NOT NULL THEN 'manual'
+                      ELSE COALESCE(pi.foja_origen, 'desconocida') END
+            ELSE COALESCE(pf.foja_origen, 'desconocida') END IN ('confirmada','manual')
+  )                                                      AS foja_firme,
+  -- Alguno de los dos extremos tiene un número que no se leyó en el papel: se dedujo de
+  -- la serie, o viene de una base anterior a esta columna y no se sabe de dónde salió.
+  -- Se muestra, porque confirmarlo no lo convierte en leído. No aplica al extremo que
+  -- una persona escribió a mano: ahí el número es suyo y su procedencia es otra.
+  ((e.foja_inicio_final IS NULL
+    AND COALESCE(pi.foja_lectura,'') IN ('interpolada','desconocida'))
+   OR (e.foja_fin_final IS NULL
+       AND COALESCE(pf.foja_lectura,'') IN ('interpolada','desconocida')))
+                                                         AS foja_interpolada,
 
   e.tipo_detectado, e.descripcion_detectada,
   e.foja_inicio_detectada, e.foja_fin_detectada,
@@ -463,14 +496,13 @@ SELECT
   COALESCE(SUM(CASE WHEN estado = 'pendiente' THEN 1 ELSE 0 END), 0) AS pendientes,
   COALESCE(SUM(CASE WHEN testigo IS NULL      THEN 1 ELSE 0 END), 0) AS sin_testigo,
   COALESCE(SUM(CASE WHEN foja_inicio IS NULL  THEN 1 ELSE 0 END), 0) AS sin_foja,
-  COALESCE(SUM(CASE WHEN foja_origen IN ('desconocida','detectada') THEN 1 ELSE 0 END), 0)
-                                                                     AS foja_sin_confirmar,
+  COALESCE(SUM(CASE WHEN NOT foja_firme THEN 1 ELSE 0 END), 0)       AS foja_sin_confirmar,
+  COALESCE(SUM(CASE WHEN foja_interpolada THEN 1 ELSE 0 END), 0)     AS foja_interpolada,
   COALESCE(SUM(CASE WHEN confianza IS NOT NULL AND confianza < 0.55 THEN 1 ELSE 0 END), 0)
                                                                      AS baja_confianza,
   COALESCE(SUM(CASE WHEN modificada THEN 1 ELSE 0 END), 0)           AS modificadas,
   COALESCE(SUM(CASE WHEN estado = 'incluida' AND testigo IS NULL THEN 1 ELSE 0 END), 0)
                                                                      AS incluidas_sin_testigo,
-  COALESCE(SUM(CASE WHEN estado = 'incluida'
-                     AND foja_origen IN ('desconocida','detectada') THEN 1 ELSE 0 END), 0)
+  COALESCE(SUM(CASE WHEN estado = 'incluida' AND NOT foja_firme THEN 1 ELSE 0 END), 0)
                                                                      AS incluidas_sin_foja_firme
 FROM v_evidencia WHERE activa = 1;

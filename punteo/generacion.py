@@ -53,6 +53,7 @@ ROMANOS = ((1000, "M"), (900, "CM"), (500, "D"), (400, "CD"), (100, "C"), (90, "
 FALTA_FOJA = "[FOJA PENDIENTE]"
 FOJA_A_CONFIRMAR = "[FOJA A CONFIRMAR]"
 FALTA_TESTIGO = "[TESTIGO PENDIENTE]"
+FOJAS_DISCONTINUAS = "[RANGO DE FOJAS A REVISAR]"
 
 PLANTILLAS = {
     "remision": "{descripcion}{fecha}, obrante a {fojas}{testigo}.",
@@ -178,8 +179,17 @@ def verificar(cx: sqlite3.Connection) -> dict:
     tipo_proceso = tipo_proceso["tipo_proceso"] if tipo_proceso else "remision"
     incluidas = _incluidas(cx)
     sin_foja = [e for e in incluidas if not e.get("foja_inicio")]
-    foja_floja = [e for e in incluidas
-                  if e.get("foja_inicio") and e.get("foja_origen") in ("desconocida", "detectada")]
+    # Con foja de inicio pero sin la del final, y de varias páginas: la cita saldría
+    # recortada a una sola foja, que es un dato falso y no un dato faltante.
+    sin_foja_final = [e for e in incluidas
+                      if e.get("foja_inicio") and not e.get("foja_fin")
+                      and (e.get("pagina_fin") or 0) > (e.get("pagina_inicio") or 0)]
+    foja_floja = [e for e in incluidas if e.get("foja_inicio") and not e.get("foja_firme")]
+    # Confirmadas, pero con un número que se dedujo de la serie en lugar de leerse en el
+    # papel. No bloquea: se dice, que es lo que corresponde con una conjetura probada.
+    foja_interpolada = [e for e in incluidas if e.get("foja_firme") and e.get("foja_interpolada")]
+    # Extremos que no son la misma serie: adentro del rango arranca otra foliatura.
+    discontinuas = [e for e in incluidas if rango_discontinuo(cx, e)]
     sin_testigo = [e for e in incluidas if not e.get("testigo")]
     contadores = dict(cx.execute("SELECT * FROM v_contadores").fetchone())
     return {
@@ -187,25 +197,66 @@ def verificar(cx: sqlite3.Connection) -> dict:
         "incluidas": len(incluidas),
         "pendientes": contadores["pendientes"],
         "sin_foja": [{"id": e["id"], "descripcion": e["descripcion"]} for e in sin_foja],
+        "sin_foja_final": [{"id": e["id"], "descripcion": e["descripcion"],
+                            "foja": e["foja_inicio"]} for e in sin_foja_final],
         "foja_sin_confirmar": [{"id": e["id"], "descripcion": e["descripcion"],
                                 "foja": e["foja_inicio"]} for e in foja_floja],
+        "foja_interpolada": [{"id": e["id"], "descripcion": e["descripcion"],
+                              "foja": e["foja_inicio"]} for e in foja_interpolada],
+        "fojas_discontinuas": [{"id": e["id"], "descripcion": e["descripcion"],
+                                "foja": e["foja_inicio"]} for e in discontinuas],
         # En abreviado el testigo introductor no es obligatorio, así que no se informa
         # como faltante: sería ruido en la mitad de los casos.
         "sin_testigo": ([{"id": e["id"], "descripcion": e["descripcion"]}
                          for e in sin_testigo] if tipo_proceso == "remision" else []),
-        "listo": bool(incluidas) and not sin_foja
+        "listo": bool(incluidas) and not sin_foja and not sin_foja_final
                  and not (tipo_proceso == "remision" and sin_testigo),
     }
 
 
 # ───────────────────────────────────────────────────────────── el armado ──
-def _fojas_de(ev: dict, exigir_confirmada: bool) -> str:
+def rango_discontinuo(cx: sqlite3.Connection, ev: dict) -> bool:
+    """
+    ¿Las fojas de las páginas de esta pieza forman una serie?
+
+    Entre dos páginas foliadas el número puede repetirse —«411» y «411 vta.»— o crecer,
+    pero nunca hacia atrás ni más de lo que hay páginas en el medio. Si crece de más,
+    adentro del rango empieza otro tramo de foliatura, y una cita «fs. 400/402» escrita
+    con los extremos confirmados tapa que en el medio hay una foja 900.
+
+    Si los dos extremos los escribió una persona, no se controla: ahí el rango lo afirmó
+    ella y el sistema no tiene nada mejor que aportar.
+    """
+    if ev.get("foja_origen") == "manual" and ev.get("foja_fin_origen") == "manual":
+        return False
+    ini = ev.get("pagina_inicio")
+    fin = ev.get("pagina_fin") or ini
+    if not ini or fin <= ini:
+        return False
+    filas = cx.execute("""SELECT numero_global, foja_num FROM pagina
+                           WHERE numero_global BETWEEN ? AND ? AND foja_num IS NOT NULL
+                           ORDER BY numero_global""", (ini, fin)).fetchall()
+    for anterior, siguiente in zip(filas, filas[1:]):
+        salto = siguiente["foja_num"] - anterior["foja_num"]
+        paginas = siguiente["numero_global"] - anterior["numero_global"]
+        if salto < 0 or salto > paginas:
+            return True
+    return False
+
+
+def _fojas_de(ev: dict, exigir_confirmada: bool, discontinuo: bool = False) -> str:
     cita = cita_fojas(ev)
     if not ev.get("foja_inicio"):
         return f"fs. {FALTA_FOJA}"
-    if exigir_confirmada and ev.get("foja_origen") in ("desconocida", "detectada"):
-        # El número está, pero lo puso la máquina. Se escribe con la marca al lado para
-        # que no llegue a un escrito como si alguien lo hubiera verificado.
+    if discontinuo:
+        # Los extremos pueden estar confirmados y el medio no ser la misma serie. La cita
+        # se escribe igual —los dos números son los que son— con la marca que avisa que
+        # entre uno y otro hay foliatura que no sigue.
+        cita = f"{cita} {FOJAS_DISCONTINUAS}"
+    if exigir_confirmada and not ev.get("foja_firme"):
+        # Alguno de los dos extremos lo puso la máquina. Se escribe con la marca al lado
+        # para que no llegue a un escrito como si alguien lo hubiera verificado: confirmar
+        # la foja donde la pieza empieza no dice nada sobre la foja donde termina.
         return f"{cita} {FOJA_A_CONFIRMAR}"
     return cita
 
@@ -217,7 +268,8 @@ def _frase_testigo(ev: dict, tipo_proceso: str) -> str:
     return f", que será introducida al debate mediante la declaración testimonial de {testigo}"
 
 
-def _parrafo(ev: dict, tipo_proceso: str, plantilla: str, exigir_confirmada: bool) -> str:
+def _parrafo(ev: dict, tipo_proceso: str, plantilla: str, exigir_confirmada: bool,
+             discontinuo: bool = False) -> str:
     fecha = fecha_en_letras(ev.get("fecha_documento"))
     # La familia manda sobre la plantilla general, salvo que el usuario haya escrito una
     # plantilla propia: si la eligió a mano, es la que vale para todo.
@@ -226,7 +278,7 @@ def _parrafo(ev: dict, tipo_proceso: str, plantilla: str, exigir_confirmada: boo
     return plantilla.format(
         descripcion=(ev.get("descripcion") or "").strip().rstrip("."),
         fecha=f", de fecha {fecha}" if fecha else "",
-        fojas=_fojas_de(ev, exigir_confirmada),
+        fojas=_fojas_de(ev, exigir_confirmada, discontinuo),
         testigo=_frase_testigo(ev, tipo_proceso),
         tipo=catalogo.etiqueta(ev.get("tipo")),
     ).replace("  ", " ")
@@ -333,7 +385,8 @@ def generar(cx: sqlite3.Connection, *, criterio: str = "manual",
                                                   numero, texto_generado)
                       VALUES (?,?, 'pieza', ?, ?, ?)""",
                    (punteo_id, orden, ev["id"], f"{numero_pieza}.-",
-                    _parrafo(ev, tipo_proceso, plantilla, exigir_foja_confirmada)))
+                    _parrafo(ev, tipo_proceso, plantilla, exigir_foja_confirmada,
+                             rango_discontinuo(cx, ev))))
 
     cx.commit()
     return leer(cx, punteo_id)

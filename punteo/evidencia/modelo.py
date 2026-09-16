@@ -190,15 +190,29 @@ def como_dict(fila: sqlite3.Row) -> dict:
     # del estado de ahora, no del momento de la detección. Guardadas quedarían viejas
     # apenas alguien confirme una foja o asigne un testigo, y una advertencia vieja es
     # peor que ninguna porque se deja de mirar.
-    if d.get("foja_origen") in ("desconocida", "detectada"):
+    if not d.get("foja_firme"):
         d["advertencias"] = d["advertencias"] + ["foja_sin_confirmar"]
+    if d.get("foja_interpolada"):
+        d["advertencias"] = d["advertencias"] + ["foja_interpolada"]
     if not d.get("foja_inicio"):
         d["advertencias"] = d["advertencias"] + ["sin_foja"]
+    elif not d.get("foja_fin") and (d.get("pagina_fin") or 0) > (d.get("pagina_inicio") or 0):
+        # Tiene foja de inicio y le falta la del final, y son varias páginas: la cita
+        # saldría como una sola foja y la pieza parecería más corta de lo que es.
+        d["advertencias"] = d["advertencias"] + ["sin_foja_final"]
+    d["foja_firme"] = bool(d.get("foja_firme"))
+    d["foja_interpolada"] = bool(d.get("foja_interpolada"))
     d["modificada"] = bool(d.get("modificada"))
     d["activa"] = bool(d.get("activa"))
     if d.get("pagina_inicio") and d.get("pagina_fin"):
         d["paginas"] = d["pagina_fin"] - d["pagina_inicio"] + 1
     return d
+
+
+def _dato(fila, clave):
+    if isinstance(fila, dict):
+        return fila.get(clave)
+    return fila[clave] if clave in fila.keys() else None
 
 
 def cita_fojas(fila) -> str:
@@ -208,12 +222,20 @@ def cita_fojas(fila) -> str:
     Si no hay foja, NO inventa una a partir de la página: devuelve el marcador visible
     que corresponde, para que quien lea el borrador vea que ahí falta un dato y no un
     número plausible.
+
+    Y una pieza de varias páginas a la que le falta la foja del final se cita
+    «fs. 409/[FOJA PENDIENTE]» y no «fs. 409». Con la segunda forma, una pieza de cinco
+    hojas entraba al escrito como si fuera una sola: el hueco no se veía y el error
+    quedaba del lado que no se nota.
     """
-    ini = (fila["foja_inicio"] if not isinstance(fila, dict) else fila.get("foja_inicio"))
-    fin = (fila["foja_fin"] if not isinstance(fila, dict) else fila.get("foja_fin"))
+    ini, fin = _dato(fila, "foja_inicio"), _dato(fila, "foja_fin")
+    pagina_inicio, pagina_fin = _dato(fila, "pagina_inicio"), _dato(fila, "pagina_fin")
     if not ini:
         return "fs. [FOJA PENDIENTE]"
-    return f"fs. {ini}" if not fin or fin == ini else f"fs. {ini}/{fin}"
+    if not fin:
+        varias = (pagina_fin or 0) > (pagina_inicio or 0)
+        return f"fs. {ini}/[FOJA PENDIENTE]" if varias else f"fs. {ini}"
+    return f"fs. {ini}" if fin == ini else f"fs. {ini}/{fin}"
 
 
 # ─────────────────────────────────────────────────────────────────── listar ──
@@ -235,7 +257,8 @@ _FILTROS = {
     "pendientes":  "estado = 'pendiente'",
     "sin_testigo": "testigo IS NULL",
     "sin_foja":    "foja_inicio IS NULL",
-    "foja_sin_confirmar": "foja_origen IN ('desconocida','detectada')",
+    "foja_sin_confirmar": "NOT foja_firme",
+    "foja_interpolada": "foja_interpolada",
     "baja_confianza": f"confianza IS NOT NULL AND confianza < {config.CONFIANZA_MEDIA}",
     "modificadas": "modificada",
     "manuales":    "origen = 'manual'",
@@ -449,6 +472,12 @@ def crear_manual(cx: sqlite3.Connection, *, pagina_inicio: int, pagina_fin: int 
     pagina_fin = pagina_fin or pagina_inicio
     if pagina_fin < pagina_inicio:
         raise OperacionInvalida("la página final es anterior a la inicial")
+    # Una foja vacía es «no la escribí», no «esta pieza no tiene foja». Guardar la cadena
+    # vacía en la columna `_final` la haría pasar por una corrección de una persona, y a
+    # partir de ahí el sistema dejaría de derivar la foja de la página.
+    foja_inicio = (foja_inicio or "").strip() or None
+    foja_fin = (foja_fin or "").strip() or None
+    observaciones = (observaciones or "").strip() or None
     if estado not in ESTADOS:
         raise OperacionInvalida(f"estado desconocido: {estado!r}")
     if tipo and tipo not in catalogo.POR_CLAVE:
